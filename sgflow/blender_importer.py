@@ -1,0 +1,320 @@
+"""Rebuild an SGFlow scene graph in Blender and render it.
+
+The command line after Blender's ``--`` separator is deliberately small:
+
+    blender --background --python sgflow/blender_importer.py -- scene.json render.png
+    blender --background --python sgflow/blender_importer.py -- scene.json materials.json render.png
+
+Use ``--full-replace`` after the separator to clear an interactive Blender
+scene too. Background invocations replace the scene automatically.
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import sys
+from dataclasses import dataclass
+
+import bpy
+from mathutils import Matrix, Vector
+
+
+class UsageError(ValueError):
+    """Raised for a malformed Blender bridge command line."""
+
+
+class MaterialManifestError(ValueError):
+    """Raised when a material manifest cannot safely be applied to a scene."""
+
+
+@dataclass(frozen=True)
+class BridgeArguments:
+    scene_path: str
+    render_path: str
+    materials_path: str | None = None
+    full_replace: bool = False
+
+
+def parse_bridge_argv(argv: list[str]) -> BridgeArguments:
+    """Parse Blender's full argv without depending on :mod:`bpy` state."""
+    if "--" not in argv:
+        raise UsageError(
+            "Missing Blender '--' separator. Usage: blender ... -- "
+            "scene.json [materials.json] render.png"
+        )
+    trailing = argv[argv.index("--") + 1:]
+    full_replace = False
+    if "--full-replace" in trailing:
+        trailing.remove("--full-replace")
+        full_replace = True
+    if any(arg.startswith("-") for arg in trailing):
+        raise UsageError("Unknown bridge option. Only --full-replace is supported after '--'.")
+    if len(trailing) == 2:
+        scene_path, render_path = trailing
+        return BridgeArguments(scene_path, render_path, full_replace=full_replace)
+    if len(trailing) == 3:
+        scene_path, materials_path, render_path = trailing
+        return BridgeArguments(scene_path, render_path, materials_path, full_replace)
+    raise UsageError(
+        "Expected scene.json render.png or scene.json materials.json render.png after '--'."
+    )
+
+
+def resolve_texture_path(path: str, manifest_dir: str, cwd: str | None = None) -> str:
+    """Resolve a texture relative to its manifest, falling back to the CWD."""
+    if not isinstance(path, str) or not path:
+        raise MaterialManifestError("Texture paths must be non-empty strings.")
+    if os.path.isabs(path):
+        return os.path.abspath(path)
+    manifest_candidate = os.path.abspath(os.path.join(manifest_dir, path))
+    if os.path.exists(manifest_candidate):
+        return manifest_candidate
+    return os.path.abspath(os.path.join(cwd or os.getcwd(), path))
+
+
+def validate_material_manifest(
+    manifest: dict,
+    scene_objects: list[dict],
+    manifest_path: str,
+    *,
+    check_files: bool = True,
+) -> dict[int, dict]:
+    """Validate and normalise a manifest before any Blender objects are made."""
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("materials"), list):
+        raise MaterialManifestError("Material manifest must contain a 'materials' list.")
+    version = manifest.get("manifest_version")
+    if version not in (None, 1):
+        raise MaterialManifestError(f"Unsupported material manifest version {version!r}.")
+
+    manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
+    by_index: dict[int, dict] = {}
+    for position, raw_entry in enumerate(manifest["materials"]):
+        if not isinstance(raw_entry, dict):
+            raise MaterialManifestError(f"materials[{position}] must be an object.")
+        index = raw_entry.get("object_index")
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(scene_objects):
+            raise MaterialManifestError(f"materials[{position}] has invalid object_index {index!r}.")
+        if index in by_index:
+            raise MaterialManifestError(f"Duplicate material entry for object_index {index}.")
+        category = raw_entry.get("category")
+        expected_category = scene_objects[index].get("category")
+        if category != expected_category:
+            raise MaterialManifestError(
+                f"materials[{position}] category {category!r} does not match "
+                f"scene object {index} category {expected_category!r}."
+            )
+
+        entry = dict(raw_entry)
+        source = entry.get("source")
+        if source not in (None, "library", "generated", "white"):
+            raise MaterialManifestError(
+                f"materials[{position}] has unsupported source {source!r}."
+            )
+        textures = entry.get("textures")
+        if source == "white" and textures is not None:
+            raise MaterialManifestError(
+                f"materials[{position}] source='white' requires textures=null."
+            )
+        if textures is not None:
+            if not isinstance(textures, dict):
+                raise MaterialManifestError(f"materials[{position}].textures must be an object or null.")
+            albedo = textures.get("albedo")
+            if not isinstance(albedo, str) or not albedo:
+                raise MaterialManifestError(f"materials[{position}] with textures requires an albedo path.")
+            resolved = {}
+            for kind, texture_path in textures.items():
+                if kind not in ("albedo", "roughness", "normal"):
+                    continue
+                resolved_path = resolve_texture_path(texture_path, manifest_dir)
+                if check_files and not os.path.isfile(resolved_path):
+                    raise MaterialManifestError(
+                        f"materials[{position}] {kind} texture does not exist: {resolved_path}"
+                    )
+                resolved[kind] = resolved_path
+            entry["textures"] = resolved
+        by_index[index] = entry
+    return by_index
+
+
+def material_signature(entry: dict) -> tuple | None:
+    """Return a stable cache key for a fully textured material."""
+    textures = entry.get("textures")
+    if not textures:
+        return None
+    params = entry.get("params") or {}
+    return (
+        tuple(sorted((kind, os.path.normcase(os.path.abspath(path))) for kind, path in textures.items())),
+        tuple(sorted((key, repr(value)) for key, value in params.items())),
+    )
+
+
+def fallback_base_color(entry: dict | None, appearance) -> tuple[float, float, float]:
+    """Resolve an untextured material color, preserving the white-model contract."""
+    if entry is not None and entry.get("source") == "white":
+        return (1.0, 1.0, 1.0)
+    values = appearance or []
+    return tuple(abs(values[index]) % 1.0 if len(values) > index else 0.5 for index in range(3))
+
+
+def clear_scene():
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
+
+
+def _stable_rot6d_basis(r6, eps: float = 1e-6):
+    """Return the same deterministic 6D rotation basis as ``math3d``.
+
+    Blender runs in its own Python environment, so importing the PyTorch
+    implementation here would make the bridge unnecessarily fragile.  Keep
+    this small scalar equivalent in sync instead, including its completion
+    for zero and collinear input vectors.
+    """
+
+    def dot(a, b):
+        return sum(x * y for x, y in zip(a, b))
+
+    def normalized(v, fallback=None):
+        length = dot(v, v) ** 0.5
+        if length <= eps:
+            return fallback
+        return tuple(value / length for value in v)
+
+    def cross(a, b):
+        return (
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        )
+
+    a1 = tuple(float(value) for value in r6[:3])
+    a2 = tuple(float(value) for value in r6[3:])
+    b1 = normalized(a1, (1.0, 0.0, 0.0))
+    projection = dot(b1, a2)
+    a2_orth = tuple(value - projection * axis for value, axis in zip(a2, b1))
+    b2 = normalized(a2_orth)
+    if b2 is None:
+        least_aligned = min(range(3), key=lambda index: abs(b1[index]))
+        axis = tuple(1.0 if index == least_aligned else 0.0 for index in range(3))
+        b2 = normalized(cross(axis, b1))
+    b3 = cross(b1, b2)
+    return b1, b2, b3
+
+
+def rot6d_to_mat3(r6):
+    """与训练侧一致、可处理退化输入的 Gram-Schmidt 正交化。"""
+    return Matrix(_stable_rot6d_basis(r6)).transposed()
+
+
+def make_proxy(name: str, category: str):
+    """Use a cube proxy until an asset library is connected."""
+    bpy.ops.mesh.primitive_cube_add(size=1.0)
+    obj = bpy.context.active_object
+    obj.name = f"{name}_{category}"
+    return obj
+
+
+def _build_material(name: str, entry: dict | None, fallback_rgb, image_cache: dict[str, object]):
+    """Build a node material, sharing already-loaded Blender images."""
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes["Principled BSDF"]
+    if entry is None or not entry.get("textures"):
+        bsdf.inputs["Base Color"].default_value = (*fallback_rgb, 1.0)
+        return mat
+    paths = entry["textures"]
+    params = entry.get("params") or {}
+    bsdf.inputs["Roughness"].default_value = params.get("roughness", 0.5)
+    bsdf.inputs["Metallic"].default_value = params.get("metallic", 0.0)
+
+    def load_img(path, non_color=False):
+        key = os.path.normcase(os.path.abspath(path))
+        img = image_cache.get(key)
+        if img is None:
+            img = bpy.data.images.load(path, check_existing=True)
+            image_cache[key] = img
+        if non_color:
+            img.colorspace_settings.name = "Non-Color"
+        return img
+
+    tex = mat.node_tree.nodes.new("ShaderNodeTexImage")
+    tex.image = load_img(paths["albedo"])
+    mat.node_tree.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    if paths.get("roughness"):
+        rough_tex = mat.node_tree.nodes.new("ShaderNodeTexImage")
+        rough_tex.image = load_img(paths["roughness"], non_color=True)
+        mat.node_tree.links.new(rough_tex.outputs["Color"], bsdf.inputs["Roughness"])
+    if paths.get("normal"):
+        nrm_tex = mat.node_tree.nodes.new("ShaderNodeTexImage")
+        nrm_tex.image = load_img(paths["normal"], non_color=True)
+        nrm_map = mat.node_tree.nodes.new("ShaderNodeNormalMap")
+        nrm_map.inputs["Strength"].default_value = params.get("bump", 1.0)
+        mat.node_tree.links.new(nrm_tex.outputs["Color"], nrm_map.inputs["Color"])
+        mat.node_tree.links.new(nrm_map.outputs["Normal"], bsdf.inputs["Normal"])
+    return mat
+
+
+def build(scene: dict, materials_manifest: dict | None = None, *, manifest_path: str | None = None, replace_scene: bool = False):
+    objects = scene.get("objects")
+    if not isinstance(objects, list):
+        raise ValueError("Scene JSON must contain an 'objects' list.")
+    mat_by_idx = (
+        validate_material_manifest(
+            materials_manifest, objects,
+            manifest_path or os.path.join(os.getcwd(), "materials.json"),
+        )
+        if materials_manifest is not None else {}
+    )
+    if replace_scene:
+        clear_scene()
+    image_cache: dict[str, object] = {}
+    material_cache: dict[tuple, object] = {}
+    for i, o in enumerate(objects):
+        obj = make_proxy(f"obj{i:03d}", o["category"])
+        t, s, R = Vector(o["position"]), Vector(o["scale"]), rot6d_to_mat3(o["rotation6d"])
+        obj.matrix_world = Matrix.Translation(t) @ R.to_4x4() @ Matrix.Diagonal((*s, 1.0))
+        entry = mat_by_idx.get(i)
+        fallback = fallback_base_color(entry, o.get("appearance"))
+        signature = material_signature(entry) if entry else None
+        mat = material_cache.get(signature) if signature else None
+        if mat is None:
+            mat = _build_material(f"mat_{o['category']}_{i:03d}", entry, fallback, image_cache)
+            if signature:
+                material_cache[signature] = mat
+        obj.data.materials.append(mat)
+    bpy.ops.mesh.primitive_plane_add(size=50)
+    bpy.ops.object.camera_add(location=(8, -8, 6))
+    cam = bpy.context.active_object
+    cam.rotation_euler = (math.radians(60), 0, math.radians(45))
+    bpy.context.scene.camera = cam
+    bpy.ops.object.light_add(type="SUN", location=(4, 4, 8))
+    bpy.context.active_object.data.energy = 3.0
+    scn = bpy.context.scene
+    try:
+        scn.render.engine = "BLENDER_EEVEE_NEXT"
+    except TypeError:
+        scn.render.engine = "BLENDER_EEVEE"
+    scn.render.resolution_x = scn.render.resolution_y = 512
+    return scn
+
+
+def main(argv: list[str] | None = None):
+    args = parse_bridge_argv(sys.argv if argv is None else argv)
+    with open(args.scene_path, encoding="utf-8") as f:
+        scene = json.load(f)
+    manifest = None
+    if args.materials_path:
+        with open(args.materials_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+    replace_scene = args.full_replace or bool(getattr(bpy.app, "background", False))
+    scn = build(scene, manifest, manifest_path=args.materials_path, replace_scene=replace_scene)
+    scn.render.filepath = os.path.abspath(args.render_path)
+    bpy.ops.render.render(write_still=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (UsageError, MaterialManifestError, OSError, json.JSONDecodeError) as exc:
+        print(f"blender_importer: {exc}", file=sys.stderr)
+        raise SystemExit(2)

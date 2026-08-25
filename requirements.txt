@@ -1,0 +1,6 @@
+# SGFlow 运行时依赖（Torch 请按 README 先单独安装 CPU/GPU 对应版）
+numpy>=1.24
+Pillow>=10.0
+
+# 可选：真实多语言文本编码（不装则自动退化为哈希 n-gram 兜底）
+# sentence-transformers>=2.2

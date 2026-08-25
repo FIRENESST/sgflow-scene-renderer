@@ -1,0 +1,24 @@
+.idea/
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+pytest-*/
+pip-*/
+torchinductor_*/
+tmp*/
+work/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Training and render outputs
+*.pt
+*.pth
+render*.png
+textures_out/
+tex_*_out/
+tex_cpu_check/
