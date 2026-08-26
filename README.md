@@ -1,3 +1,5 @@
+# 特别感谢：model Kimi-K3/ChatGPT-5.6Sol
+
 # SGFlow — 一句话生成结构化三维场景
 
 SGFlow（**S**cene **G**raph **Flow**）是一个面向 Blender 渲染流程的 Python 研究原型：输入自然语言，生成带类别、位置、旋转、尺寸和外观潜变量的场景图，再导出程序纹理或查找纹理库，最后由 Blender 子进程重建和渲染。
