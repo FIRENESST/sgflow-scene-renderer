@@ -75,3 +75,23 @@ def test_sparse_structure_loss_backpropagates_and_sampling_is_deterministic():
     assert torch.equal(sample1[~obj_mask], torch.zeros_like(sample1[~obj_mask]))
     with pytest.raises(ValueError, match="positive"):
         flow.sample(model, cat, text, text_mask, obj_mask, steps=0)
+
+
+def test_compile_restores_eager_forward_after_lazy_backend_failure(monkeypatch):
+    cfg = tiny_config()
+    model = SceneDenoiser(cfg)
+
+    def fake_compile(_forward, **_kwargs):
+        def broken(*_args, **_call_kwargs):
+            raise RuntimeError("backend unavailable")
+        return broken
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    model.compile()
+    z = torch.randn(1, cfg.max_objects, cfg.latent_dim)
+    cat = torch.tensor([[1, 2, 0, 0]])
+    mask = cat.ne(0)
+    text = torch.randn(1, 2, cfg.d_model)
+    with pytest.warns(RuntimeWarning, match="restored eager"):
+        output = model(z, torch.tensor([0.5]), cat, text, torch.ones(1, 2, dtype=torch.bool), mask)
+    assert output.shape == z.shape

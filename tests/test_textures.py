@@ -70,9 +70,9 @@ def test_generated_export_is_deterministic_and_batched(tmp_path, monkeypatch):
     from sgflow import tex_assets
     original = tex_assets.render_textures
     monkeypatch.setattr(tex_assets, "render_textures", lambda *args, **kwargs: (calls.append(args[0]["freq"].size(0)) or original(*args, **kwargs)))
-    first = TexAssetExporter(cfg, seed=19, batch_size=2).export_scene(sg, out_dir=str(tmp_path / "one"), size=8)
+    first = TexAssetExporter(cfg, device="cpu", seed=19, batch_size=2).export_scene(sg, out_dir=str(tmp_path / "one"), size=8)
     assert calls == [2, 1]
-    second = TexAssetExporter(cfg, seed=19, batch_size=1).export_scene(sg, out_dir=str(tmp_path / "two"), size=8)
+    second = TexAssetExporter(cfg, device="cpu", seed=19, batch_size=1).export_scene(sg, out_dir=str(tmp_path / "two"), size=8)
     assert first["materials"] == second["materials"]
     for entry in first["materials"]:
         filename = entry["textures"]["albedo"]
@@ -83,7 +83,7 @@ def test_generated_export_is_deterministic_and_batched(tmp_path, monkeypatch):
 
 def test_empty_scene_and_library_portable_hit_miss(tmp_path):
     cfg = _cfg()
-    empty = TexAssetExporter(cfg).export_scene(_empty_scene(cfg), out_dir=str(tmp_path / "empty"), size=8)
+    empty = TexAssetExporter(cfg, device="cpu").export_scene(_empty_scene(cfg), out_dir=str(tmp_path / "empty"), size=8)
     assert empty == {"manifest_version": 1, "materials": []}
     lib = tmp_path / "library"
     (lib / "table").mkdir(parents=True)

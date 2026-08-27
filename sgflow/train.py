@@ -71,8 +71,13 @@ def train(
         raise ValueError("batch_size must be positive")
     random.seed(seed)
     torch.manual_seed(seed)
-    device = str(device)
-    is_cuda = device.startswith("cuda")
+    from .device import configure_cuda_runtime, resolve_amp_dtype, validate_device
+
+    device = validate_device(device)
+    is_cuda = torch.device(device).type == "cuda"
+    cuda_profile = configure_cuda_runtime(cfg, device)
+    amp_dtype = resolve_amp_dtype(cfg, device)
+    amp_enabled = is_cuda and cfg.use_amp
     if is_cuda:
         torch.cuda.manual_seed_all(seed)
     dataset = SceneJsonDataset(data_dir)
@@ -92,19 +97,21 @@ def train(
     if texhead is not None:
         trainable += list(texhead.parameters())
     opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=0.01)
+    scale_gradients = amp_enabled and amp_dtype == torch.float16
     try:
-        scaler = torch.amp.GradScaler("cuda", enabled=(is_cuda and cfg.use_amp))
+        scaler = torch.amp.GradScaler("cuda", enabled=scale_gradients)
     except (AttributeError, TypeError):  # older supported PyTorch releases
-        scaler = torch.cuda.amp.GradScaler(enabled=(is_cuda and cfg.use_amp))
+        scaler = torch.cuda.amp.GradScaler(enabled=scale_gradients)
     start_epoch = 0
     if payload:
         start_epoch = restore_checkpoint(
-            payload, model=model, encoder=enc, texhead=texhead, optimizer=opt, scaler=scaler,
+            payload, model=model, encoder=enc, texhead=texhead, optimizer=opt,
+            scaler=scaler if scale_gradients else None,
         )
     if is_cuda and cfg.use_compile:
         model.compile()
     amp_ctx = lambda: torch.autocast(
-        device_type="cuda", dtype=torch.float16, enabled=(is_cuda and cfg.use_amp)
+        device_type="cuda" if is_cuda else "cpu", dtype=amp_dtype, enabled=amp_enabled
     )
     dl = DataLoader(
         dataset,
@@ -127,8 +134,8 @@ def train(
             z1 = z1.to(device, non_blocking=is_cuda)
             cat = cat.to(device, non_blocking=is_cuda)
             mask = mask.to(device, non_blocking=is_cuda)
-            tok, tmask = enc(prompts)
             with amp_ctx():
+                tok, tmask = enc(prompts)
                 loss, logs = flow.loss(model, z1, cat, tok, tmask, mask)
                 if texhead is not None and mask.any():
                     pooled = masked_mean(tok, tmask)[:, None, :].expand(-1, mask.size(1), -1)
@@ -156,8 +163,16 @@ def train(
         print(f"epoch {ep:03d}  {summary}")
         save_checkpoint(
             output, cfg=cfg, model=model, encoder=enc, texhead=texhead,
-            optimizer=opt, scaler=scaler, epoch=ep + 1,
-            metadata={"averaged_logs": averages, "seed": seed},
+            optimizer=opt, scaler=scaler if scale_gradients else None, epoch=ep + 1,
+            metadata={
+                "averaged_logs": averages,
+                "seed": seed,
+                "runtime": {
+                    "device": device,
+                    "amp_dtype": str(amp_dtype).removeprefix("torch."),
+                    "cuda": cuda_profile,
+                },
+            },
         )
 
 
@@ -176,10 +191,18 @@ def main():
     if device is None:
         from .device import resolve_device
         device = resolve_device()
-    train(
-        SGFlowConfig(), a.data, a.epochs, a.lr, a.batch_size, device,
-        output=a.output, resume=a.resume, seed=a.seed,
-    )
+    try:
+        train(
+            SGFlowConfig(), a.data, a.epochs, a.lr, a.batch_size, device,
+            output=a.output, resume=a.resume, seed=a.seed,
+        )
+    except torch.OutOfMemoryError as exc:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise SystemExit(
+            "CUDA out of memory: lower --batch-size, max_objects, texture_train_size, "
+            "or disable generated texture training"
+        ) from exc
 
 
 if __name__ == "__main__":

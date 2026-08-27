@@ -6,6 +6,8 @@ GPU 优化：
 - SceneDenoiser 提供 .compile() 做 torch.compile 图融合
 """
 import math
+import importlib.util
+import warnings
 
 import torch
 import torch.nn as nn
@@ -195,9 +197,44 @@ class SceneDenoiser(nn.Module):
         return v * obj_mask[..., None].to(v.dtype) if obj_mask is not None else v
 
     def compile(self, **kwargs):
-        """torch.compile 图融合（GPU 上收益最大）；失败时静默回退 eager"""
+        """Compile the forward path with a first-call eager fallback.
+
+        Backend compilation is lazy, so wrapping ``torch.compile`` in a simple
+        try/except does not catch many Windows/Triton failures.  This guard also
+        catches that first execution, restores eager mode, and keeps the job
+        alive while making the fallback visible.
+        """
+        if getattr(self, "_sgflow_compiled", False):
+            return self
+        eager_forward = self.forward
+        first_parameter = next(self.parameters(), None)
+        if (
+            first_parameter is not None
+            and first_parameter.device.type == "cuda"
+            and importlib.util.find_spec("triton") is None
+        ):
+            warnings.warn(
+                "torch.compile requested for CUDA but Triton is unavailable; using eager mode",
+                RuntimeWarning,
+            )
+            return self
         try:
-            self.forward = torch.compile(self.forward, **kwargs)
-        except Exception:
-            pass
+            compiled_forward = torch.compile(eager_forward, **kwargs)
+        except Exception as exc:
+            warnings.warn(f"torch.compile unavailable; using eager mode ({exc})", RuntimeWarning)
+            return self
+
+        def guarded_forward(*args, **call_kwargs):
+            try:
+                return compiled_forward(*args, **call_kwargs)
+            except Exception as exc:
+                self.forward = eager_forward
+                warnings.warn(
+                    f"torch.compile failed on first execution; restored eager mode ({exc})",
+                    RuntimeWarning,
+                )
+                return eager_forward(*args, **call_kwargs)
+
+        self.forward = guarded_forward
+        self._sgflow_compiled = True
         return self

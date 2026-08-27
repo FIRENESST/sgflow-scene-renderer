@@ -6,7 +6,7 @@ import json
 import math
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from numbers import Real
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ class SceneGraph:
     rot6d: torch.Tensor
     log_scale: torch.Tensor
     appearance: torch.Tensor
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _validate_categories(self.categories)
@@ -68,6 +69,12 @@ class SceneGraph:
                 raise ValueError(f"{name}: contains non-finite values")
         if not torch.isfinite(self.log_scale.exp()).all():
             raise ValueError("log_scale: must correspond to finite positive scales")
+        if not isinstance(self.metadata, dict):
+            raise ValueError("metadata: must be a mapping")
+        try:
+            json.dumps(self.metadata, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("metadata: must be finite JSON-serializable data") from exc
 
     @property
     def n(self) -> int:
@@ -85,18 +92,31 @@ class SceneGraph:
 
     def morton_sorted(self) -> "SceneGraph":
         idx = torch.arange(self.n, device=self.pos.device) if self.n == 0 else morton_order(self.pos)
-        return SceneGraph(self.categories, self.cat[idx], self.pos[idx], self.rot6d[idx], self.log_scale[idx], self.appearance[idx])
+        metadata = dict(self.metadata)
+        object_ids = metadata.get("object_ids")
+        if isinstance(object_ids, list) and len(object_ids) == self.n:
+            metadata["object_ids"] = [object_ids[int(index)] for index in idx.cpu()]
+        return SceneGraph(
+            self.categories, self.cat[idx], self.pos[idx], self.rot6d[idx],
+            self.log_scale[idx], self.appearance[idx], metadata=metadata,
+        )
 
     def to_latent(self) -> torch.Tensor:
         return torch.cat([self.pos, self.rot6d, self.log_scale, self.appearance], dim=-1)
 
     @classmethod
-    def from_latent(cls, z: torch.Tensor, cat: torch.Tensor, categories: list) -> "SceneGraph":
+    def from_latent(
+        cls, z: torch.Tensor, cat: torch.Tensor, categories: list,
+        metadata: dict[str, Any] | None = None,
+    ) -> "SceneGraph":
         if not isinstance(z, torch.Tensor) or z.ndim != 2 or z.size(1) < 12:
             raise ValueError("z must have shape (N, 12 + A)")
         if not isinstance(cat, torch.Tensor) or cat.ndim != 1 or cat.size(0) != z.size(0):
             raise ValueError("cat must have shape (N,) matching z")
-        return cls(categories, cat, z[:, :3], z[:, 3:9], z[:, 9:12], z[:, 12:])
+        return cls(
+            categories, cat, z[:, :3], z[:, 3:9], z[:, 9:12], z[:, 12:],
+            metadata=dict(metadata or {}),
+        )
 
     @classmethod
     def from_objects(cls, objects: list, categories: list, d_appearance: int = 16) -> "SceneGraph":
@@ -144,12 +164,15 @@ class SceneGraph:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schema_version": SCHEMA_VERSION, "objects": [
+        data = {"schema_version": SCHEMA_VERSION, "objects": [
             {"category": self.categories[int(c)], "position": p.detach().cpu().tolist(),
              "rotation6d": r.detach().cpu().tolist(), "scale": s.detach().cpu().exp().tolist(),
              "appearance": a.detach().cpu().tolist()}
             for c, p, r, s, a in zip(self.cat, self.pos, self.rot6d, self.log_scale, self.appearance)
         ]}
+        if self.metadata:
+            data["metadata"] = self.metadata
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], categories: list, d_appearance: int = 16) -> "SceneGraph":
@@ -160,7 +183,14 @@ class SceneGraph:
             raise ValueError(f"unsupported schema_version {version!r}; expected {SCHEMA_VERSION}")
         if "objects" not in data:
             raise ValueError("scene JSON is missing objects")
-        return cls.from_objects(data["objects"], categories, d_appearance)
+        metadata = data.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ValueError("scene JSON metadata must be a mapping")
+        scene = cls.from_objects(data["objects"], categories, d_appearance)
+        return cls(
+            scene.categories, scene.cat, scene.pos, scene.rot6d,
+            scene.log_scale, scene.appearance, metadata=dict(metadata),
+        )
 
     def fingerprint(self) -> str:
         canonical = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)

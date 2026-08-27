@@ -33,6 +33,7 @@ class SGFlowConfig:
     w_collision: float = 1.0
     w_boundary: float = 1.0
     w_support: float = 0.5
+    collision_mode: str = "obb"       # "obb"=精确有向盒 SAT | "aabb"=旧版快速近似
     # ---- 纹理策略（二选一）----
     texture_mode: str = "generated"        # "generated"=模型生成 | "library"=接纹理库
     texture_lib: str = "textures_lib"      # 库目录：<lib>/<category>/albedo.png[+rough.png+normal.png]
@@ -42,6 +43,9 @@ class SGFlowConfig:
     # ---- GPU 优化开关 ----
     use_amp: bool = True                   # 训练自动混合精度（仅 CUDA 生效）
     use_compile: bool = True               # torch.compile 图融合（仅 CUDA 生效）
+    amp_dtype: str = "auto"               # auto 优先 BF16；也可固定 float16 / bfloat16
+    cuda_allow_tf32: bool = True           # RTX 30+ 的 FP32 Tensor Core 加速
+    cuda_cudnn_benchmark: bool = True      # 固定输入形状下选择更快的卷积内核
     ssm_chunk: int = 64                    # PyTorch SSM 参考扫描的循环分组大小
 
     def __post_init__(self):
@@ -82,6 +86,10 @@ class SGFlowConfig:
             raise ValueError("categories must contain PAD and at least one non-empty object category")
         if self.texture_mode not in {"generated", "library"}:
             raise ValueError("texture_mode must be 'generated' or 'library'")
+        if self.collision_mode not in {"obb", "aabb"}:
+            raise ValueError("collision_mode must be 'obb' or 'aabb'")
+        if self.amp_dtype not in {"auto", "float16", "bfloat16"}:
+            raise ValueError("amp_dtype must be 'auto', 'float16', or 'bfloat16'")
         if not isinstance(self.text_model, str) or not self.text_model:
             raise ValueError("text_model must be a non-empty string")
         if not isinstance(self.texture_lib, str) or not self.texture_lib:
@@ -90,7 +98,7 @@ class SGFlowConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be a finite non-negative number")
-        for name in ("use_amp", "use_compile"):
+        for name in ("use_amp", "use_compile", "cuda_allow_tf32", "cuda_cudnn_benchmark"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be boolean")
 

@@ -15,6 +15,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass
+from numbers import Real
 
 import bpy
 from mathutils import Matrix, Vector
@@ -26,6 +27,44 @@ class UsageError(ValueError):
 
 class MaterialManifestError(ValueError):
     """Raised when a material manifest cannot safely be applied to a scene."""
+
+
+def _finite_vector(value, width: int, label: str, *, positive: bool = False):
+    if not isinstance(value, (list, tuple)) or len(value) != width:
+        raise ValueError(f"{label} must contain exactly {width} numbers.")
+    if any(isinstance(item, bool) or not isinstance(item, Real) for item in value):
+        raise ValueError(f"{label} must contain only numbers.")
+    result = [float(item) for item in value]
+    if not all(math.isfinite(item) for item in result):
+        raise ValueError(f"{label} contains non-finite values.")
+    if positive and any(item <= 0 for item in result):
+        raise ValueError(f"{label} must contain only positive values.")
+    return result
+
+
+def validate_scene_payload(scene: dict) -> list[dict]:
+    """Validate all geometry before background mode mutates the Blender file."""
+    if not isinstance(scene, dict):
+        raise ValueError("Scene JSON must contain an object.")
+    version = scene.get("schema_version")
+    if version is not None and (type(version) is not int or version != 1):
+        raise ValueError(f"Unsupported scene schema version {version!r}.")
+    objects = scene.get("objects")
+    if not isinstance(objects, list):
+        raise ValueError("Scene JSON must contain an 'objects' list.")
+    for index, item in enumerate(objects):
+        if not isinstance(item, dict):
+            raise ValueError(f"objects[{index}] must be an object.")
+        if not isinstance(item.get("category"), str) or not item["category"]:
+            raise ValueError(f"objects[{index}].category must be a non-empty string.")
+        _finite_vector(item.get("position"), 3, f"objects[{index}].position")
+        _finite_vector(item.get("rotation6d"), 6, f"objects[{index}].rotation6d")
+        _finite_vector(item.get("scale"), 3, f"objects[{index}].scale", positive=True)
+        appearance = item.get("appearance", [])
+        if not isinstance(appearance, (list, tuple)):
+            raise ValueError(f"objects[{index}].appearance must be a numeric list.")
+        _finite_vector(appearance, len(appearance), f"objects[{index}].appearance")
+    return objects
 
 
 @dataclass(frozen=True)
@@ -84,7 +123,7 @@ def validate_material_manifest(
     if not isinstance(manifest, dict) or not isinstance(manifest.get("materials"), list):
         raise MaterialManifestError("Material manifest must contain a 'materials' list.")
     version = manifest.get("manifest_version")
-    if version not in (None, 1):
+    if version is not None and (type(version) is not int or version != 1):
         raise MaterialManifestError(f"Unsupported material manifest version {version!r}.")
 
     manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
@@ -255,9 +294,7 @@ def _build_material(name: str, entry: dict | None, fallback_rgb, image_cache: di
 
 
 def build(scene: dict, materials_manifest: dict | None = None, *, manifest_path: str | None = None, replace_scene: bool = False):
-    objects = scene.get("objects")
-    if not isinstance(objects, list):
-        raise ValueError("Scene JSON must contain an 'objects' list.")
+    objects = validate_scene_payload(scene)
     mat_by_idx = (
         validate_material_manifest(
             materials_manifest, objects,
@@ -285,17 +322,30 @@ def build(scene: dict, materials_manifest: dict | None = None, *, manifest_path:
     bpy.ops.mesh.primitive_plane_add(size=50)
     bpy.ops.object.camera_add(location=(8, -8, 6))
     cam = bpy.context.active_object
-    cam.rotation_euler = (math.radians(60), 0, math.radians(45))
+    # Track the room center instead of relying on an Euler triple that changes
+    # meaning with camera orientation conventions.
+    direction = Vector((0.0, 0.0, 1.0)) - cam.location
+    cam.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
     bpy.context.scene.camera = cam
     bpy.ops.object.light_add(type="SUN", location=(4, 4, 8))
     bpy.context.active_object.data.energy = 3.0
     scn = bpy.context.scene
-    try:
-        scn.render.engine = "BLENDER_EEVEE_NEXT"
-    except TypeError:
-        scn.render.engine = "BLENDER_EEVEE"
+    configure_render_engine(scn)
     scn.render.resolution_x = scn.render.resolution_y = 512
+    scn.render.resolution_percentage = 100
     return scn
+
+
+def configure_render_engine(scene) -> str:
+    """Select the Eevee identifier used by Blender 4.x/5.x or 3.x."""
+    failures = []
+    for engine in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE"):
+        try:
+            scene.render.engine = engine
+            return engine
+        except (AttributeError, TypeError, ValueError) as exc:
+            failures.append(f"{engine}: {exc}")
+    raise RuntimeError("No supported Eevee render engine (" + "; ".join(failures) + ")")
 
 
 def main(argv: list[str] | None = None):
@@ -309,12 +359,15 @@ def main(argv: list[str] | None = None):
     replace_scene = args.full_replace or bool(getattr(bpy.app, "background", False))
     scn = build(scene, manifest, manifest_path=args.materials_path, replace_scene=replace_scene)
     scn.render.filepath = os.path.abspath(args.render_path)
+    output_dir = os.path.dirname(scn.render.filepath)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     bpy.ops.render.render(write_still=True)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (UsageError, MaterialManifestError, OSError, json.JSONDecodeError) as exc:
+    except (UsageError, MaterialManifestError, RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"blender_importer: {exc}", file=sys.stderr)
         raise SystemExit(2)

@@ -6,7 +6,12 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sgflow.constraints import scene_penalty
+from sgflow.constraints import (
+    collision_penalty,
+    obb_collision_penalty,
+    scene_penalty,
+    world_aabb_half_extents,
+)
 from sgflow.math3d import matrix_to_rot6d, morton_order, rot6d_to_matrix
 
 
@@ -70,3 +75,20 @@ def test_masked_slots_never_supply_support():
     removed = scene_penalty(z[:, :1], torch.tensor([[True]]), torch.tensor([[True]]), cfg)
     assert torch.allclose(masked, removed)
     assert masked > 0
+
+
+def test_obb_sat_avoids_rotated_aabb_false_positive():
+    theta = torch.tensor(torch.pi / 4)
+    c, s = theta.cos(), theta.sin()
+    rotation = torch.tensor([
+        [c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0],
+    ]).repeat(2, 1, 1)[None]
+    scale = torch.tensor([[[2.0, 0.2, 0.2], [2.0, 0.2, 0.2]]])
+    pos = torch.tensor([[[0.0, 0.0, 0.1], [-0.2, 0.2, 0.1]]])
+    mask = torch.tensor([[True, True]])
+    half = world_aabb_half_extents(rotation, scale)
+
+    assert collision_penalty(pos, half, mask) > 0
+    assert torch.allclose(
+        obb_collision_penalty(pos, rotation, scale, mask), torch.tensor(0.0), atol=1e-6,
+    )

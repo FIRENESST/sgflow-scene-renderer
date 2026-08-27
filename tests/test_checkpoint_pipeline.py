@@ -99,6 +99,8 @@ def test_seeded_generation_repeats_without_changing_global_rng(tmp_path):
 @pytest.mark.parametrize("kwargs", [
     {"d_model": 10}, {"flow_steps": 0}, {"room_size": (8, -1, 4)},
     {"categories": ["chair", "pad"]}, {"texture_mode": "other"},
+    {"collision_mode": "sphere"},
+    {"amp_dtype": "float32"}, {"cuda_allow_tf32": "yes"},
     {"texture_batch_size": 0}, {"texture_train_size": 1},
 ])
 def test_config_validation(kwargs):
@@ -112,20 +114,25 @@ def test_device_validation_and_atomic_write(tmp_path, monkeypatch):
     destination = tmp_path / "device.json"
     monkeypatch.setattr(device, "_CONFIG_PATH", str(destination))
     device.set_device("GPU")
-    assert destination.read_text(encoding="utf-8") == '{"device": "gpu"}'
+    assert destination.read_text(encoding="utf-8") == '{"device": "cuda"}'
     assert not list(tmp_path.glob("*.tmp"))
     with pytest.raises(ValueError):
         device.set_device("tpu")
 
 
 def test_checkpoint_resume_metadata(tmp_path):
+    from sgflow.device import device_report
+
     cfg = tiny_cfg()
     model, encoder = components(cfg)
     optimizer = torch.optim.AdamW([*model.parameters(), *encoder.proj.parameters()])
     path = tmp_path / "resume.pt"
     save_checkpoint(
         path, cfg=cfg, model=model, encoder=encoder, optimizer=optimizer,
-        epoch=7, metadata={"averaged_logs": {"flow": 1.25}},
+        epoch=7, metadata={
+            "averaged_logs": {"flow": 1.25},
+            "runtime": device_report(),
+        },
     )
     payload = read_checkpoint(path, cfg=cfg)
     new_model, new_encoder = components(cfg)
@@ -135,3 +142,4 @@ def test_checkpoint_resume_metadata(tmp_path):
     )
     assert epoch == 7
     assert payload["metadata"]["averaged_logs"]["flow"] == 1.25
+    assert isinstance(payload["metadata"]["runtime"]["torch"], str)

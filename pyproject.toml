@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sgflow"
-version = "0.2.0"
+version = "0.4.0"
 description = "Text-conditioned structured 3D scene generation for Blender"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,6 +12,7 @@ dependencies = [
   "numpy>=1.24",
   "Pillow>=10.0",
   "torch>=2.0",
+  "openai>=1.40,<4",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +22,9 @@ test = ["pytest>=8.0"]
 [project.scripts]
 sgflow-train = "sgflow.train:main"
 sgflow-textures = "sgflow.tex_assets:main"
+sgflow-openai = "sgflow.openai_compat:main"
+sgflow-doctor = "sgflow.runtime:main"
+sgflow-device = "sgflow.device:main"
 
 [tool.setuptools.packages.find]
 include = ["sgflow*"]

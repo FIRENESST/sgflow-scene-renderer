@@ -15,6 +15,28 @@ NON_SUPPORT_CATS = {"pad", "floor", "wall", "rug", "window", "door"}
 
 
 class ScenePipeline:
+    @classmethod
+    def from_openai(
+        cls, *, model: str | None = None, base_url: str | None = None,
+        api_key: str | None = None, cfg: SGFlowConfig | None = None,
+        device: str | None = None, client=None, **service_options,
+    ):
+        """Build the checkpoint-free OpenAI-compatible planning backend.
+
+        ``OPENAI_API_KEY``, ``OPENAI_BASE_URL`` and ``OPENAI_MODEL`` are used
+        when their corresponding arguments are omitted.  The return value has
+        the same ``generate(...)->SceneGraph`` contract as ``ScenePipeline``.
+        """
+        from .openai_compat import OpenAICompatibleConfig, OpenAICompatibleScenePipeline
+
+        service = OpenAICompatibleConfig.from_env(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            **service_options,
+        )
+        return OpenAICompatibleScenePipeline(service, cfg, device=device, client=client)
+
     def __init__(
         self, cfg: SGFlowConfig | None = None, device: str = None,
         checkpoint: str = None, *, allow_untrained: bool = False,
@@ -23,10 +45,16 @@ class ScenePipeline:
             raise ValueError("a trained checkpoint is required; pass allow_untrained=True for smoke tests")
         payload = read_checkpoint(checkpoint, cfg=cfg, map_location="cpu") if checkpoint else None
         self.cfg = payload["config_obj"] if cfg is None and payload is not None else (cfg or SGFlowConfig())
+        from .device import configure_cuda_runtime, resolve_amp_dtype, validate_device
         if device is None:
             from .device import resolve_device
             device = resolve_device(self.cfg)
+        else:
+            device = validate_device(device)
         self.device = torch.device(device)
+        self.cuda_profile = configure_cuda_runtime(self.cfg, self.device)
+        self.amp_enabled = self.device.type == "cuda" and self.cfg.use_amp
+        self.amp_dtype = resolve_amp_dtype(self.cfg, self.device)
         backend = None
         if payload and payload.get("encoder"):
             backend = payload["encoder"].get("backend_kind")
@@ -61,7 +89,11 @@ class ScenePipeline:
         actual_seed = int(seed) if seed is not None else generator.seed()
         if seed is not None:
             generator.manual_seed(actual_seed)
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast(
+            device_type=self.device.type,
+            dtype=self.amp_dtype,
+            enabled=self.amp_enabled,
+        ):
             tok, tmask = self.encoder([prompt])
             tok, tmask = tok.to(self.device), tmask.to(self.device)
             # 1) 结构：逐槽位类别多项式采样（保留多样性）
@@ -89,6 +121,9 @@ class ScenePipeline:
             z = self.flow.sample(
                 self.model, cat, tok, tmask, mask, steps, generator=generator,
             )
+            # Geometric refinement is intentionally float32 even when the
+            # neural forward uses BF16/FP16 autocast.
+            z = z.float()
         # 3) 约束精修（需要梯度，放在 no_grad 外）
         z = self._refine(z, cat, mask, refine_steps)
         # 约束层以这个区间解释 log-scale；导出时保持相同语义，避免 exp 溢出。

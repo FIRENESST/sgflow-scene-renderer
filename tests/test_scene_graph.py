@@ -21,6 +21,23 @@ def test_versioned_json_round_trip_and_fingerprint():
     assert restored.fingerprint() == graph.fingerprint()
 
 
+def test_scene_metadata_round_trip():
+    graph = SceneGraph.from_objects([], CATEGORIES, 2)
+    graph.metadata = {"generator": "test", "relations": []}
+    restored = SceneGraph.from_dict(graph.to_dict(), CATEGORIES, 2)
+    assert restored.metadata == graph.metadata
+
+
+def test_morton_sort_keeps_metadata_object_ids_aligned():
+    graph = SceneGraph.from_objects([
+        {"category": "chair", "position": [2, 0, 0], "appearance": [0, 0]},
+        {"category": "table", "position": [0, 0, 0], "appearance": [0, 0]},
+    ], CATEGORIES, 2)
+    graph.metadata = {"object_ids": ["chair_1", "table_1"]}
+    sorted_graph = graph.morton_sorted()
+    assert sorted_graph.metadata["object_ids"] == ["table_1", "chair_1"]
+
+
 def test_legacy_json_and_empty_scene_shapes():
     graph = SceneGraph.from_dict(json.loads('{"objects": []}'), CATEGORIES, 4)
     assert graph.cat.shape == (0,)

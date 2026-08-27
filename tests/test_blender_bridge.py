@@ -87,3 +87,40 @@ def test_manifest_validation_rejects_unsafe_entries(bridge, materials, message):
         bridge.validate_material_manifest(
             {"materials": materials}, [{"category": "chair"}], "C:/manifest/materials.json", check_files=False
         )
+
+
+def test_scene_is_fully_validated_before_build(bridge):
+    valid = {
+        "schema_version": 1,
+        "objects": [{
+            "category": "chair", "position": [0, 0, 0.5],
+            "rotation6d": [1, 0, 0, 0, 1, 0], "scale": [1, 1, 1],
+            "appearance": [],
+        }],
+    }
+    assert bridge.validate_scene_payload(valid) == valid["objects"]
+    invalid = {**valid, "objects": [{**valid["objects"][0], "scale": [1, 0, 1]}]}
+    with pytest.raises(ValueError, match="positive"):
+        bridge.validate_scene_payload(invalid)
+    with pytest.raises(ValueError, match="schema version"):
+        bridge.validate_scene_payload({**valid, "schema_version": True})
+
+
+def test_render_engine_supports_new_and_legacy_blender_names(bridge):
+    class Render:
+        def __init__(self):
+            self.selected = None
+
+        @property
+        def engine(self):
+            return self.selected
+
+        @engine.setter
+        def engine(self, value):
+            if value == "BLENDER_EEVEE_NEXT":
+                raise TypeError("unsupported enum")
+            self.selected = value
+
+    scene = types.SimpleNamespace(render=Render())
+    assert bridge.configure_render_engine(scene) == "BLENDER_EEVEE"
+    assert scene.render.engine == "BLENDER_EEVEE"

@@ -1,6 +1,7 @@
-# SGFlow 运行时依赖（Torch 请按 README 先单独安装 CPU/GPU 对应版）
+# SGFlow 通用运行时依赖（先安装 requirements-cpu.txt 或 requirements-gpu.txt）
 numpy>=1.24
 Pillow>=10.0
+openai>=1.40,<4
 
 # 可选：真实多语言文本编码（不装则自动退化为哈希 n-gram 兜底）
 # sentence-transformers>=2.2

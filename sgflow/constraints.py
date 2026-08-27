@@ -27,6 +27,49 @@ def collision_penalty(pos, half, mask):
     return (pen * pair).sum() / pair.sum().clamp_min(1.0)
 
 
+def obb_collision_penalty(pos, rotation, scale, mask, eps: float = 1e-7):
+    """Exact pairwise OBB overlap penalty using the 15 separating axes.
+
+    The old world-AABB approximation reports collisions for many diagonally
+    placed objects.  SAT tests the three local axes of each box plus their nine
+    cross products, while remaining differentiable for layout refinement.
+    """
+    if pos.size(1) < 2:
+        return pos.sum() * 0.0
+    half = scale * 0.5
+    # Matrix columns are local axes in world coordinates.  Store axes as the
+    # penultimate dimension to make the pairwise projections explicit.
+    local = rotation.transpose(-1, -2)                         # (B,N,3,3)
+    n = pos.size(1)
+    axes_i = local[:, :, None].expand(-1, -1, n, -1, -1)
+    axes_j = local[:, None, :].expand(-1, n, -1, -1, -1)
+    cross = torch.cross(
+        axes_i[..., :, None, :], axes_j[..., None, :, :], dim=-1,
+    ).reshape(*axes_i.shape[:3], 9, 3)
+    axes = torch.cat([axes_i, axes_j, cross], dim=-2)           # (B,N,N,15,3)
+    axis_norm = axes.norm(dim=-1, keepdim=True)
+    valid_axis = axis_norm.squeeze(-1) > eps
+    axes = axes / axis_norm.clamp_min(eps)
+
+    delta = pos[:, :, None, :] - pos[:, None, :, :]
+    distance = torch.einsum("bijlc,bijc->bijl", axes, delta).abs()
+    projection_i = torch.einsum("bijlc,bijac->bijla", axes, axes_i).abs()
+    projection_j = torch.einsum("bijlc,bijac->bijla", axes, axes_j).abs()
+    radius_i = (projection_i * half[:, :, None, None, :]).sum(-1)
+    radius_j = (projection_j * half[:, None, :, None, :]).sum(-1)
+    overlap = radius_i + radius_j - distance
+    # Parallel-axis cross products carry no separating information.
+    overlap = torch.where(valid_axis, overlap, torch.full_like(overlap, torch.inf))
+    penetration = F.relu(overlap.amin(-1))
+
+    upper = torch.triu(
+        torch.ones(n, n, dtype=torch.bool, device=pos.device), diagonal=1,
+    )[None]
+    pair = mask[:, :, None] & mask[:, None, :] & upper
+    weights = pair.to(penetration.dtype)
+    return (penetration * weights).sum() / weights.sum().clamp_min(1.0)
+
+
 def boundary_penalty(pos, half, mask, room):
     """物体 AABB 须在房间范围内：x,y 居中，z 从地面 0 到层高 h。mask 为 bool"""
     mn = pos.new_tensor([-room[0] / 2, -room[1] / 2, 0.0])
@@ -61,9 +104,15 @@ def scene_penalty(z, mask, needs_support, cfg):
     """组合约束，对潜变量 z 完全可微。mask / needs_support 为 bool"""
     pos, rot6d, log_s, _ = unpack_latent(z)
     scale = torch.exp(log_s.clamp(-4, 2))
-    half = world_aabb_half_extents(rot6d_to_matrix(rot6d), scale)
+    rotation = rot6d_to_matrix(rot6d)
+    half = world_aabb_half_extents(rotation, scale)
+    collision = (
+        obb_collision_penalty(pos, rotation, scale, mask)
+        if getattr(cfg, "collision_mode", "obb") == "obb"
+        else collision_penalty(pos, half, mask)
+    )
     return (
-        cfg.w_collision * collision_penalty(pos, half, mask)
+        cfg.w_collision * collision
         + cfg.w_boundary * boundary_penalty(pos, half, mask, cfg.room_size)
         + cfg.w_support * support_penalty(pos, half, mask, needs_support)
     )

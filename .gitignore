@@ -1,6 +1,7 @@
 .idea/
 .venv/
 .venv-*/
+sgflow_device.json
 __pycache__/
 *.py[cod]
 *.egg-info/

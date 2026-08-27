@@ -32,14 +32,26 @@ logger = logging.getLogger("sgflow.tex")
 class TexAssetExporter:
     """批量为场景中的物体生成/查找纹理，并输出 Blender 材质清单"""
 
-    def __init__(self, cfg: SGFlowConfig, device: str = "cpu", texture_mode: str = None,
+    def __init__(self, cfg: SGFlowConfig, device: str | None = None, texture_mode: str = None,
                  texture_lib: str = None, seed: int = 0, batch_size: int = None):
         self.cfg = cfg
-        self.device = torch.device(device)
         self.mode = texture_mode or cfg.texture_mode
         self.lib = texture_lib or cfg.texture_lib
         if self.mode not in ("generated", "library"):
             raise ValueError(f"texture_mode 只能是 generated/library，收到: {self.mode!r}")
+        if self.mode == "generated":
+            from .device import configure_cuda_runtime, resolve_amp_dtype, resolve_device, validate_device
+
+            resolved = validate_device(device) if device is not None else resolve_device(cfg)
+            self.device = torch.device(resolved)
+            self.cuda_profile = configure_cuda_runtime(cfg, self.device)
+            self.amp_enabled = self.device.type == "cuda" and cfg.use_amp
+            self.amp_dtype = resolve_amp_dtype(cfg, self.device)
+        else:
+            self.device = torch.device("cpu")
+            self.cuda_profile = None
+            self.amp_enabled = False
+            self.amp_dtype = torch.float32
         batch_size = cfg.texture_batch_size if batch_size is None else batch_size
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
             raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
@@ -168,8 +180,13 @@ class TexAssetExporter:
             stop = min(start + batch_size, sg.n)
             cat = sg.cat[start:stop].to(self.device)
             app = sg.appearance[start:stop].to(self.device)
-            out = self.texhead(cat, app, pooled.expand(stop - start, -1))
-            albedo, rough, normal = render_textures(out, size=size, seed=scene_seed + start)
+            with torch.autocast(
+                device_type=self.device.type,
+                dtype=self.amp_dtype,
+                enabled=self.amp_enabled,
+            ):
+                out = self.texhead(cat, app, pooled.expand(stop - start, -1))
+                albedo, rough, normal = render_textures(out, size=size, seed=scene_seed + start)
             for local, i in enumerate(range(start, stop)):
                 category = sg.categories[int(sg.cat[i])]
                 name = f"obj{i:03d}_{category}"
@@ -247,6 +264,7 @@ def main():
     p.add_argument("--size", type=int, default=256)
     p.add_argument("--seed", type=int, default=0, help="deterministic generated-texture seed")
     p.add_argument("--batch-size", type=int, default=None, help="objects rendered per generated batch")
+    p.add_argument("--device", default=None, help="默认读取 SGFlow 设备配置")
     p.add_argument("--checkpoint", default=None, help="SGFlow checkpoint containing encoder/TexHead weights")
     p.add_argument("--allow-untrained", action="store_true",
                    help="explicit smoke-test mode: use deterministic but untrained texture weights")
@@ -266,6 +284,11 @@ def main():
 
     mode = a.mode or cfg.texture_mode
     sg = SceneGraph.from_json(a.scene, cfg.categories, cfg.d_appearance)
+    batch_size = a.batch_size or cfg.texture_batch_size
+    exporter = TexAssetExporter(
+        cfg, device=a.device, texture_mode=mode, texture_lib=a.lib,
+        seed=a.seed, batch_size=batch_size,
+    )
     if mode == "generated":
         if payload is None and not a.allow_untrained:
             p.error("generated mode requires --checkpoint (or explicit --allow-untrained for a smoke test)")
@@ -273,7 +296,9 @@ def main():
         from .text_encoder import TextEncoder
         encoder_payload = payload.get("encoder") if payload else None
         backend = encoder_payload.get("backend_kind") if encoder_payload else None
-        enc = TextEncoder(cfg.d_model, cfg.text_model, cfg.text_dim, backend_kind=backend)
+        enc = TextEncoder(
+            cfg.d_model, cfg.text_model, cfg.text_dim, backend_kind=backend,
+        ).to(exporter.device)
         if encoder_payload:
             enc.load_adapter_state_dict(encoder_payload.get("adapter", {}))
         enc.eval()
@@ -282,9 +307,6 @@ def main():
     else:
         tok = tmask = None  # library 模式不需要文本条件
 
-    batch_size = a.batch_size or cfg.texture_batch_size
-    exporter = TexAssetExporter(cfg, texture_mode=mode, texture_lib=a.lib,
-                                seed=a.seed, batch_size=batch_size)
     if mode == "generated" and payload:
         texhead_state = payload.get("texhead")
         if texhead_state is None:

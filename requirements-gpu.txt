@@ -1,0 +1,4 @@
+# CUDA 13.0 PyTorch runtime for Windows/Linux NVIDIA GPUs (RTX 30/40/50 series).
+# The CUDA wheel also retains the CPU execution path selected by sgflow-device.
+--index-url https://download.pytorch.org/whl/cu130
+torch==2.13.0
