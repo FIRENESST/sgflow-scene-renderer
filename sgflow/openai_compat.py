@@ -22,6 +22,11 @@ class LLMServiceError(RuntimeError):
     """An OpenAI-compatible endpoint failed or returned unusable output."""
 
 
+def _strip_invisible(value: str) -> str:
+    """去掉粘贴时混入的首尾空白与控制字符（Tab、零宽空格等）。"""
+    return "".join(ch for ch in value.strip() if ch.isprintable())
+
+
 @dataclass(frozen=True)
 class OpenAICompatibleConfig:
     """Connection settings that can also be populated from OpenAI env vars."""
@@ -35,6 +40,11 @@ class OpenAICompatibleConfig:
     structured_output: str = "auto"
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "model", _strip_invisible(self.model) if isinstance(self.model, str) else self.model)
+        if isinstance(self.base_url, str):
+            object.__setattr__(self, "base_url", _strip_invisible(self.base_url) or None)
+        if isinstance(self.api_key, str):
+            object.__setattr__(self, "api_key", _strip_invisible(self.api_key) or None)
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError("model must be a non-empty string")
         if self.base_url is not None and (

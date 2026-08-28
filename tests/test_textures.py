@@ -23,6 +23,17 @@ def _scene(cfg, count=2):
     )
 
 
+def _scene_by_names(cfg, names):
+    """按类别名构造场景，不依赖类别表顺序。"""
+    return SceneGraph(
+        cfg.categories,
+        torch.tensor([cfg.categories.index(n) for n in names], dtype=torch.long),
+        torch.zeros(len(names), 3),
+        torch.tensor([[1, 0, 0, 0, 1, 0]] * len(names), dtype=torch.float32),
+        torch.zeros(len(names), 3), torch.zeros(len(names), cfg.d_appearance),
+    )
+
+
 def _empty_scene(cfg):
     return SceneGraph(cfg.categories, torch.empty(0, dtype=torch.long), torch.empty(0, 3),
                       torch.empty(0, 6), torch.empty(0, 3), torch.empty(0, cfg.d_appearance))
@@ -88,7 +99,7 @@ def test_empty_scene_and_library_portable_hit_miss(tmp_path):
     lib = tmp_path / "library"
     (lib / "table").mkdir(parents=True)
     (lib / "table" / "albedo.png").write_bytes(b"not read")
-    sg = _scene(cfg, 2)
+    sg = _scene_by_names(cfg, ["table", "wall"])
     manifest = TexAssetExporter(cfg, texture_mode="library", texture_lib=str(lib)).export_scene(sg, out_dir=str(tmp_path / "out"))
     assert manifest["materials"][0]["source"] == "library"
     assert not manifest["materials"][0]["textures"]["albedo"].startswith(str(lib))

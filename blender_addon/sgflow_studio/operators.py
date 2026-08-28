@@ -44,7 +44,10 @@ def _load_importer(project_dir: str):
 
 def build_scene_in_blender(context, project_dir: str, scene_path: str,
                            materials_path: str | None, replace: bool):
-    """在进程内重建场景（复用桥接校验与材质逻辑）。"""
+    """在进程内重建场景（复用桥接校验与材质逻辑）。
+
+    importer 全部走 data API，不依赖 UI context，modal 回调里可直接调用。
+    """
     importer = _load_importer(project_dir)
     with open(scene_path, encoding="utf-8") as f:
         scene = json.load(f)
@@ -279,9 +282,24 @@ class SGFLOW_OT_render_scene(bpy.types.Operator):
         scn.render.resolution_x = scn.render.resolution_y = settings.resolution
         scn.render.resolution_percentage = 100
         render_path = bpy.path.abspath(settings.render_path)
-        os.makedirs(os.path.dirname(render_path) or ".", exist_ok=True)
+        if settings.render_path.startswith("//") and not bpy.data.filepath:
+            # 未保存的 .blend：// 会解析到 Blender 启动目录（如 C:\），通常不可写。
+            # 兜底到偏好设置的输出目录。
+            render_path = os.path.join(
+                bpy.path.abspath(prefs.output_dir),
+                os.path.basename(render_path) or "sgflow_render.png",
+            )
+        try:
+            os.makedirs(os.path.dirname(render_path) or ".", exist_ok=True)
+        except OSError as exc:
+            self.report({"ERROR"}, f"无法创建渲染输出目录：{exc}")
+            return {"CANCELLED"}
         scn.render.filepath = render_path
-        bpy.ops.render.render(write_still=True)
+        try:
+            bpy.ops.render.render(write_still=True)
+        except RuntimeError as exc:
+            self.report({"ERROR"}, f"渲染失败：{exc}")
+            return {"CANCELLED"}
         settings.status = f"渲染完成（{engine}）：{render_path}"
         self.report({"INFO"}, f"SGFlow 渲染完成：{render_path}")
         return {"FINISHED"}

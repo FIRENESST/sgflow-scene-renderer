@@ -197,8 +197,9 @@ def fallback_base_color(entry: dict | None, appearance) -> tuple[float, float, f
 
 
 def clear_scene():
-    bpy.ops.object.select_all(action="SELECT")
-    bpy.ops.object.delete(use_global=False)
+    """删除当前场景全部对象。用 data API 而非 bpy.ops，避免依赖 UI context。"""
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
 
 
 def _stable_rot6d_basis(r6, eps: float = 1e-6):
@@ -246,10 +247,17 @@ def rot6d_to_mat3(r6):
 
 
 def make_proxy(name: str, category: str):
-    """Use a cube proxy until an asset library is connected."""
-    bpy.ops.mesh.primitive_cube_add(size=1.0)
-    obj = bpy.context.active_object
-    obj.name = f"{name}_{category}"
+    """用 data API 建一个单位立方体代理，直到接入资产库。"""
+    mesh = bpy.data.meshes.new(f"mesh_{name}")
+    # 单位立方体：8 顶点 6 四边面
+    verts = [(-0.5, -0.5, -0.5), (-0.5, -0.5, 0.5), (-0.5, 0.5, 0.5), (-0.5, 0.5, -0.5),
+             (0.5, -0.5, -0.5), (0.5, -0.5, 0.5), (0.5, 0.5, 0.5), (0.5, 0.5, -0.5)]
+    faces = [(0, 1, 2, 3), (7, 6, 5, 4), (4, 5, 1, 0), (5, 6, 2, 1),
+             (6, 7, 3, 2), (7, 4, 0, 3)]
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    obj = bpy.data.objects.new(f"{name}_{category}", mesh)
+    bpy.context.scene.collection.objects.link(obj)
     return obj
 
 
@@ -336,17 +344,30 @@ def build(scene: dict, materials_manifest: dict | None = None, *, manifest_path:
             if signature:
                 material_cache[signature] = mat
         obj.data.materials.append(mat)
-    bpy.ops.mesh.primitive_plane_add(size=50)
-    bpy.ops.object.camera_add(location=(8, -8, 6))
-    cam = bpy.context.active_object
+    # 地面 / 相机 / 太阳灯：全部走 data API，后台与 UI 行为一致
+    ground_mesh = bpy.data.meshes.new("mesh_ground")
+    s = 25.0
+    ground_mesh.from_pydata([(-s, -s, 0), (s, -s, 0), (s, s, 0), (-s, s, 0)], [], [(0, 1, 2, 3)])
+    ground_mesh.update()
+    ground = bpy.data.objects.new("ground", ground_mesh)
+    scn = bpy.context.scene
+    scn.collection.objects.link(ground)
+
+    cam_data = bpy.data.cameras.new("camera")
+    cam = bpy.data.objects.new("camera", cam_data)
+    cam.location = (8, -8, 6)
+    scn.collection.objects.link(cam)
     # Track the room center instead of relying on an Euler triple that changes
     # meaning with camera orientation conventions.
     direction = Vector((0.0, 0.0, 1.0)) - cam.location
     cam.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
-    bpy.context.scene.camera = cam
-    bpy.ops.object.light_add(type="SUN", location=(4, 4, 8))
-    bpy.context.active_object.data.energy = 3.0
-    scn = bpy.context.scene
+    scn.camera = cam
+
+    sun_data = bpy.data.lights.new("sun", type="SUN")
+    sun_data.energy = 3.0
+    sun = bpy.data.objects.new("sun", sun_data)
+    sun.location = (4, 4, 8)
+    scn.collection.objects.link(sun)
     configure_render_engine(scn)
     scn.render.resolution_x = scn.render.resolution_y = 512
     scn.render.resolution_percentage = 100

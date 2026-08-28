@@ -5,8 +5,24 @@ from dataclasses import dataclass, field
 PAD_ID = 0
 
 DEFAULT_CATEGORIES = [
-    "pad", "floor", "wall", "table", "chair", "sofa", "bed", "lamp",
-    "shelf", "plant", "window", "door", "rug", "tv", "desk", "cabinet",
+    "pad",
+    # 结构（通常由渲染器生成房间外壳，LLM 一般省略）
+    "floor", "wall", "window", "door",
+    # 家具
+    "table", "chair", "sofa", "bed", "desk", "cabinet", "shelf",
+    "bookshelf", "nightstand", "wardrobe", "bench", "stool", "armchair",
+    "coffee_table", "dining_table", "dresser",
+    # 灯具与电器
+    "lamp", "floor_lamp", "ceiling_lamp", "tv", "monitor", "laptop",
+    "speaker", "fan", "air_conditioner", "heater", "refrigerator",
+    "washing_machine", "microwave", "oven", "sink", "toilet", "bathtub",
+    # 装饰与软物
+    "plant", "rug", "curtain", "pillow", "mirror", "painting", "clock",
+    "vase", "book", "towel",
+    # 人物与动物
+    "person", "monkey", "dog", "cat", "bird", "horse", "rabbit",
+    # 载具（室内车库 / 室外场景用）
+    "car", "bicycle", "motorcycle",
 ]
 
 
