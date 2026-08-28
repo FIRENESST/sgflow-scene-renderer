@@ -181,6 +181,20 @@ textures_lib/
 
 `materials.json` 的纹理路径相对于清单文件，因此整个输出目录可移动。
 
+## Blender 侧边栏插件（SGFlow Studio）
+
+`blender_addon/sgflow_studio/` 是 Blender 4.2+/5.x 扩展格式的图形界面插件，在 3D 视口侧边栏（按 `N`）提供 “SGFlow” 标签页：
+
+- **① 提示词生成**：输入自然语言，调用项目 venv 的 `sgflow.openai_compat` 生成场景并自动导入（子进程模态执行，不冻结 UI；可选生成后直接渲染）。
+- **② 场景导入**：选择已有场景 JSON（可选材质清单），在进程内复用 `sgflow/blender_importer.py` 的校验与材质逻辑重建。
+- **③ 纹理导出**：library / generated 模式，调用 `sgflow.tex_assets` 子进程。
+- **④ 渲染**：自动选择 Eevee 引擎，输出到指定路径。
+- 底部状态栏显示最近结果，可一键打开输出目录。
+
+安装：把 `blender_addon/sgflow_studio/` 整个文件夹复制到 Blender 用户插件目录（Windows 为 `%APPDATA%\Blender Foundation\Blender\<版本>\scripts\addons\`），重启 Blender 后在 编辑 → 偏好设置 → 插件 中搜索 “SGFlow Studio” 并勾选；展开插件偏好填写 SGFlow 项目目录、项目 Python（`.venv` 中的 `python.exe`）、OpenAI 兼容服务（模型名 / Base URL / API Key）与纹理库路径。API Key 仅保存在本机 Blender 偏好中，不会写入场景文件。
+
+Blender 自带 Python 无需安装 torch/openai：生成与纹理导出通过子进程调用项目 venv 完成，场景重建复用的桥接模块只依赖 `bpy` 和标准库。已在 Blender 5.2.1 LTS 上验证：插件启用、五个操作符与面板注册、导入 15 物体场景、EEVEE 无界面渲染均通过（无界面回归脚本见 `blender_addon_test.py`）。
+
 ## Blender 重建与渲染
 
 ```bash
@@ -310,6 +324,9 @@ sgflow/
 ├── tex_raster.py       # 向量化纹理光栅器
 ├── tex_assets.py       # 分批 generated / library 导出
 └── blender_importer.py # 材质校验、路径解析和 Blender 重建
+
+blender_addon/
+└── sgflow_studio/      # Blender 4.2+/5.x 侧边栏扩展（面板/操作符/偏好）
 ```
 
 ## 已知边界

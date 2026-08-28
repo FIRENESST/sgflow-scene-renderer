@@ -23,3 +23,5 @@ render*.png
 textures_out/
 tex_*_out/
 tex_cpu_check/
+blender_out/
+blender_addon_test_result.json

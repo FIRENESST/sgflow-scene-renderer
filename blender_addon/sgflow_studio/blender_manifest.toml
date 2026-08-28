@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+
+id = "sgflow_studio"
+version = "0.1.1"
+name = "SGFlow Studio"
+tagline = "一句话生成结构化三维场景：OpenAI 兼容后端 + SGFlow 桥接"
+maintainer = "FIRENESST"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+[permissions]
+network = "调用 OpenAI 兼容 API 生成场景（仅在你点击生成时）"
+files = "读写场景 JSON、纹理输出与渲染结果"
