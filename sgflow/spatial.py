@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from numbers import Real
 from typing import Any
@@ -204,12 +205,15 @@ def _relation_penalty(
             elif relation == "against_back_wall":
                 loss = (pos[a, 1] - half[a, 1] + room_y / 2).abs()
             else:
-                loss = pos[a, :2].square().sum().sqrt()
+                # eps 开方：物体恰在房间中心时 sqrt(0) 的梯度为 Inf。
+                loss = (pos[a, :2].square().sum() + 1e-12).sqrt()
             losses.append(loss)
             continue
 
         b = id_to_index[edge.object_id]
         delta = pos[b] - pos[a]
+        # eps 开方替代 .norm()：两物体 XY 完全重叠时 norm 的反向是 0/0 NaN。
+        distance_xy = (delta[:2].square().sum() + 1e-12).sqrt()
         if relation == "left_of":
             loss = F.relu(pos[a, 0] + half[a, 0] + margin - (pos[b, 0] - half[b, 0]))
         elif relation == "right_of":
@@ -223,10 +227,10 @@ def _relation_penalty(
         elif relation == "below":
             loss = F.relu(pos[a, 2] + half[a, 2] + margin - (pos[b, 2] - half[b, 2]))
         elif relation == "near":
-            surface_gap = delta[:2].norm() - half[a, :2].norm() - half[b, :2].norm()
+            surface_gap = distance_xy - half[a, :2].norm() - half[b, :2].norm()
             loss = F.relu(surface_gap - 1.0)
         elif relation == "far":
-            surface_gap = delta[:2].norm() - half[a, :2].norm() - half[b, :2].norm()
+            surface_gap = distance_xy - half[a, :2].norm() - half[b, :2].norm()
             loss = F.relu(2.0 - surface_gap)
         elif relation == "on":
             vertical = (pos[a, 2] - half[a, 2] - pos[b, 2] - half[b, 2]).abs()
@@ -238,7 +242,8 @@ def _relation_penalty(
         elif relation == "aligned_y":
             loss = (pos[a, 1] - pos[b, 1]).abs()
         elif relation == "facing":
-            target = F.normalize(delta[:2].unsqueeze(0), dim=-1, eps=1e-6)[0]
+            # 手写归一化：F.normalize 内部同样是 norm，零向量反向会产生 NaN。
+            target = delta[:2] / distance_xy
             heading = torch.stack([-yaw[a].sin(), yaw[a].cos()])
             loss = 1.0 - (heading * target).sum()
         elif relation == "parallel_to":
@@ -320,10 +325,20 @@ def refine_spatial_plan(
                 + 4.0 * relations
                 + regularizer
             )
+            if not torch.isfinite(loss):
+                break
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
         pos, yaw = pos.detach(), yaw.detach()
+        if not (torch.isfinite(pos).all() and torch.isfinite(yaw).all()):
+            # 任何意外的数值发散都不应逃逸到 SceneGraph 校验：回退到
+            # 已经过严格校验的初始布局，保证输出始终有限可用。
+            warnings.warn(
+                "layout refinement diverged; falling back to the initial layout",
+                stacklevel=2,
+            )
+            pos, yaw = initial_pos.clone(), initial_yaw.clone()
 
     # Hard final projection makes bounds an invariant even for a zero-step run.
     rotation = yaw_to_matrix(yaw)

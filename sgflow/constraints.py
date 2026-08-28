@@ -47,9 +47,11 @@ def obb_collision_penalty(pos, rotation, scale, mask, eps: float = 1e-7):
         axes_i[..., :, None, :], axes_j[..., None, :, :], dim=-1,
     ).reshape(*axes_i.shape[:3], 9, 3)
     axes = torch.cat([axes_i, axes_j, cross], dim=-2)           # (B,N,N,15,3)
-    axis_norm = axes.norm(dim=-1, keepdim=True)
-    valid_axis = axis_norm.squeeze(-1) > eps
-    axes = axes / axis_norm.clamp_min(eps)
+    # 平方和 + eps 开方替代 torch.norm：平行轴叉积为零向量时，norm 的反向是
+    # 0/0 NaN，会经 clamp 的零梯度路径以 0*NaN 形式传播成 NaN 梯度。
+    axis_sq = axes.square().sum(dim=-1, keepdim=True)
+    valid_axis = axis_sq.squeeze(-1) > eps * eps
+    axes = axes / (axis_sq + 1e-12).sqrt()
 
     delta = pos[:, :, None, :] - pos[:, None, :, :]
     distance = torch.einsum("bijlc,bijc->bijl", axes, delta).abs()

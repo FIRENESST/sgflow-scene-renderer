@@ -6,6 +6,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sgflow.config import SGFlowConfig
 from sgflow.constraints import (
     collision_penalty,
     obb_collision_penalty,
@@ -13,6 +14,12 @@ from sgflow.constraints import (
     world_aabb_half_extents,
 )
 from sgflow.math3d import matrix_to_rot6d, morton_order, rot6d_to_matrix
+from sgflow.spatial import (
+    PlannedObject,
+    SpatialPlan,
+    SpatialRelation,
+    refine_spatial_plan,
+)
 
 
 def test_rot6d_degenerate_inputs_are_finite_proper_rotations():
@@ -50,6 +57,46 @@ def test_morton_order_empty_and_per_axis_normalization():
 
 def _cfg(**weights):
     return SimpleNamespace(room_size=(2.0, 2.0, 2.0), **weights)
+
+
+def _tiny_sgflow_cfg():
+    return SGFlowConfig(
+        text_model="unused", text_dim=8, d_model=8, n_layers=1, n_latents=2,
+        d_state=2, expand=1, max_objects=4, max_generated_objects=4,
+        d_appearance=2, flow_steps=1, room_size=(4.0, 4.0, 3.0),
+        categories=["pad", "chair", "table", "lamp"], use_compile=False,
+    )
+
+
+def test_obb_collision_backward_is_finite_for_identical_parallel_boxes():
+    """完全重叠且平行的盒子产生零叉积轴，反向梯度不得出现 NaN。"""
+    pos = torch.zeros((1, 2, 3))
+    rotation = torch.eye(3).expand(1, 2, 3, 3).clone()
+    scale = torch.ones((1, 2, 3))
+    pos.requires_grad_(True)
+    rotation.requires_grad_(True)
+    penalty = obb_collision_penalty(pos, rotation, scale, torch.ones(1, 2, dtype=torch.bool)[None])
+    penalty.backward()
+    assert torch.isfinite(pos.grad).all()
+    assert torch.isfinite(rotation.grad).all()
+
+
+def test_refine_spatial_plan_stays_finite_with_degenerate_layout():
+    """重叠 + 平行朝向 + near/facing/居中关系：refine 输出必须始终有限。"""
+    cfg = _tiny_sgflow_cfg()
+    objects = (
+        PlannedObject("chair_a", "chair", (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), 0.0),
+        PlannedObject("chair_b", "chair", (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), 0.0),
+    )
+    plan = SpatialPlan(objects, (
+        SpatialRelation("chair_a", "near", "chair_b"),
+        SpatialRelation("chair_a", "facing", "chair_b"),
+        SpatialRelation("chair_a", "center_of_room", "room"),
+    ))
+    scene = refine_spatial_plan(plan, cfg, steps=32, device="cpu")
+    assert torch.isfinite(scene.pos).all()
+    assert torch.isfinite(scene.rot6d).all()
+    assert torch.isfinite(scene.log_scale).all()
 
 
 def test_rotated_extent_contributes_to_boundary_penalty():
