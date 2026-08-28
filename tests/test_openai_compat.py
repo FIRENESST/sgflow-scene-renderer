@@ -95,9 +95,6 @@ def test_scene_pipeline_factory_reads_explicit_openai_compatible_settings():
         ({"objects": [], "relations": []}, "non-empty"),
         ({"objects": [{"id": "x", "category": "sofa", "position": [0, 0, 0],
                        "size": [1, 1, 1], "yaw_degrees": 0}], "relations": []}, "unsupported"),
-        ({"objects": PLAN["objects"], "relations": [
-            {"subject_id": "missing", "relation": "near", "object_id": "table_1"}
-        ]}, "unknown subject"),
     ],
 )
 def test_invalid_model_plans_fail_before_scene_construction(payload, message):
@@ -108,6 +105,51 @@ def test_invalid_model_plans_fail_before_scene_construction(payload, message):
     )
     with pytest.raises(LLMServiceError, match=message):
         pipeline.generate("anything", refine_steps=0)
+
+
+def test_unusable_relations_are_dropped_with_warning():
+    """缺字段/None/未知值/悬空引用/自引用的关系被丢弃，不再让整个生成失败。"""
+    payload = {
+        "objects": PLAN["objects"],
+        "relations": [
+            {"subject_id": "chair_1", "relation": "left_of", "object_id": "table_1"},
+            {"subject_id": "chair_1", "relation": None, "object_id": "table_1"},
+            {"subject_id": "chair_1", "object_id": "table_1"},
+            {"subject_id": "missing", "relation": "near", "object_id": "table_1"},
+            {"subject_id": "chair_1", "relation": "near", "object_id": "chair_1"},
+            {"subject_id": "chair_1", "relation": "levitating", "object_id": "table_1"},
+            "not-a-dict",
+        ],
+    }
+    client, _ = fake_client(payload)
+    pipeline = OpenAICompatibleScenePipeline(
+        OpenAICompatibleConfig(model="fake", api_key="test"), tiny_cfg(),
+        device="cpu", client=client,
+    )
+    with pytest.warns(UserWarning, match="6 unusable relation"):
+        plan = pipeline.plan("a room")
+    assert [r.relation for r in plan.relations] == ["left_of"]
+
+
+def test_relation_field_and_value_aliases_are_normalized():
+    """常见模型字段别名（subject/type/object）和自造关系说法被归一化。"""
+    payload = {
+        "objects": PLAN["objects"],
+        "relations": [
+            {"subject": "chair_1", "type": "next_to", "object": "table_1"},
+            {"subject_id": "chair_1", "relation": "Left Of", "object_id": "table_1"},
+            {"subject_id": "chair_1", "predicate": "on-top-of", "object_id": "table_1"},
+            {"subject_id": "chair_1", "relation": "against_back_wall", "object_id": "table_1"},
+        ],
+    }
+    client, _ = fake_client(payload)
+    pipeline = OpenAICompatibleScenePipeline(
+        OpenAICompatibleConfig(model="fake", api_key="test"), tiny_cfg(),
+        device="cpu", client=client,
+    )
+    with pytest.warns(UserWarning, match="1 unusable relation"):
+        plan = pipeline.plan("a room")
+    assert [r.relation for r in plan.relations] == ["near", "left_of", "on"]
 
 
 def test_local_base_url_can_use_placeholder_key(monkeypatch):

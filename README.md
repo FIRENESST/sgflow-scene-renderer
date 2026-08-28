@@ -122,7 +122,7 @@ scene = pipeline.generate(
 scene.to_json("scene.json")
 ```
 
-可显式传入 `model`、`base_url`、`api_key`、`timeout`、`max_retries` 和 `structured_output`。`structured_output="auto"` 会先请求严格 JSON Schema；仅当服务端以 400/404/415/422 明确拒绝该格式时，依次退回 JSON Object 和纯文本 JSON。无论服务端采用哪种格式，本地仍会拒绝未知类别、重复 ID、非有限值、非法尺寸和悬空关系引用。密钥不会写入检查点或场景 JSON。
+可显式传入 `model`、`base_url`、`api_key`、`timeout`、`max_retries` 和 `structured_output`。`structured_output="auto"` 会先请求严格 JSON Schema；仅当服务端以 400/404/415/422 明确拒绝该格式时，依次退回 JSON Object 和纯文本 JSON。无论服务端采用哪种格式，本地仍会拒绝未知类别、重复 ID、非有限值和非法尺寸；关系字段先做别名归一化（`type`/`predicate` 等键名、`next_to`/`on_top_of` 等常见说法），仍不可用或悬空引用的单条关系会被丢弃并给出警告，不再让整个生成失败。密钥不会写入检查点或场景 JSON。
 
 API 场景 JSON 的 `metadata` 会记录模型名、对象 ID、稀疏关系和空间求解器版本，方便复现与排错，但不会记录 API 密钥。
 
