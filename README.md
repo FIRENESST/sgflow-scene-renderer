@@ -1,4 +1,4 @@
-特别感谢：model Kimi-K3/ChatGPT-5.6Sol
+特别感谢：model Kimi-K3/Codex Cli(GPT-5.6Sol)
 
 # SGFlow — 一句话生成结构化三维场景
 
