@@ -253,11 +253,28 @@ def make_proxy(name: str, category: str):
     return obj
 
 
+def _principled_bsdf(node_tree):
+    """按类型定位 Principled BSDF 节点。
+
+    Blender 的“翻译新数据名称”选项会把默认节点改名为界面语言
+    （如“原理化 BSDF”），因此不能按节点名字符串索引。
+    """
+    for node in node_tree.nodes:
+        if node.type == "BSDF_PRINCIPLED":
+            return node
+    bsdf = node_tree.nodes.new("ShaderNodeBsdfPrincipled")
+    for node in node_tree.nodes:
+        if node.type == "OUTPUT_MATERIAL":
+            node_tree.links.new(bsdf.outputs["BSDF"], node.inputs["Surface"])
+            break
+    return bsdf
+
+
 def _build_material(name: str, entry: dict | None, fallback_rgb, image_cache: dict[str, object]):
     """Build a node material, sharing already-loaded Blender images."""
     mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
-    bsdf = mat.node_tree.nodes["Principled BSDF"]
+    bsdf = _principled_bsdf(mat.node_tree)
     if entry is None or not entry.get("textures"):
         bsdf.inputs["Base Color"].default_value = (*fallback_rgb, 1.0)
         return mat
