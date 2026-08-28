@@ -1,4 +1,4 @@
-特别感谢：model Kimi-K3/Codex Cli(GPT-5.6Sol)
+特别感谢：model Kimi-K3/ChatGPT-5.6Sol
 
 # SGFlow — 一句话生成结构化三维场景
 
@@ -188,10 +188,53 @@ textures_lib/
 - **① 提示词生成**：输入自然语言，调用项目 venv 的 `sgflow.openai_compat` 生成场景并自动导入（子进程模态执行，不冻结 UI；可选生成后直接渲染）。
 - **② 场景导入**：选择已有场景 JSON（可选材质清单），在进程内复用 `sgflow/blender_importer.py` 的校验与材质逻辑重建。
 - **③ 纹理导出**：library / generated 模式，调用 `sgflow.tex_assets` 子进程。
-- **④ 渲染**：自动选择 Eevee 引擎，输出到指定路径。
+- **④ 渲染**：自动选择 Eevee 引擎，输出到指定路径（未保存的 `.blend` 会自动落到插件偏好的输出目录，避免写到 `C:\` 根目录）。
 - 底部状态栏显示最近结果，可一键打开输出目录。
 
-安装：把 `blender_addon/sgflow_studio/` 整个文件夹复制到 Blender 用户插件目录（Windows 为 `%APPDATA%\Blender Foundation\Blender\<版本>\scripts\addons\`），重启 Blender 后在 编辑 → 偏好设置 → 插件 中搜索 “SGFlow Studio” 并勾选；展开插件偏好填写 SGFlow 项目目录、项目 Python（`.venv` 中的 `python.exe`）、OpenAI 兼容服务（模型名 / Base URL / API Key）与纹理库路径。API Key 仅保存在本机 Blender 偏好中，不会写入场景文件。
+场景重建全部走 `bpy.data` 数据 API（不依赖 `bpy.ops` 的 UI context），因此在模态回调和后台模式下行为一致。
+
+### 安装（推荐：链接式，改源码即时生效）
+
+开发期推荐让 Blender 直接从项目目录加载插件，省去每次复制。设置环境变量 `BLENDER_USER_SCRIPTS` 指向仓库的 `blender_addon` 目录即可，Blender 会把它当作用户脚本根目录，自动发现其中的 `sgflow_studio`：
+
+```powershell
+# 永久生效（用户级）
+[Environment]::SetEnvironmentVariable(
+  "BLENDER_USER_SCRIPTS",
+  "C:\Users\43828\Desktop\MyProject\AIRenderPipeline\blender_addon",
+  "User")
+```
+
+设置后重启 Blender，在 编辑 → 偏好设置 → 插件 中搜索 “SGFlow Studio” 并勾选。此后改动 `blender_addon/sgflow_studio/` 里的源码，只需在 Blender 里按 `F3` 搜索 “Reload Scripts” 即可加载最新代码，无需重新安装。
+
+> Microsoft Store 版 Blender 的用户配置不在 `%APPDATA%`，而在
+> `%LOCALAPPDATA%\Packages\BlenderFoundation.Blender_ppwjx1n5r4v9t\LocalCache\Roaming\...`，
+> 该目录受 Store ACL 保护，脚本难以写入。`BLENDER_USER_SCRIPTS` 方案完全绕开这个目录，对 Store 版和安装版都适用。
+
+### 安装（备选：传统复制）
+
+也可以把 `blender_addon/sgflow_studio/` 整个文件夹复制到 Blender 用户插件目录后重启：
+
+- 安装版：`%APPDATA%\Blender Foundation\Blender\<版本>\scripts\addons\`
+- Store 版：`%LOCALAPPDATA%\Packages\BlenderFoundation.Blender_ppwjx1n5r4v9t\LocalCache\Roaming\Blender Foundation\Blender\<版本>\scripts\addons\`
+
+复制方式在源码更新后需要重新同步，开发期不建议。
+
+### 插件偏好设置
+
+展开插件偏好，填写：
+
+| 字段 | 说明 |
+|---|---|
+| SGFlow 项目目录 | 仓库根目录（含 `sgflow/` 包） |
+| 项目 Python | `.venv\Scripts\python.exe`（需已装 torch/openai） |
+| 模型名 | OpenAI 兼容模型名（对应 `OPENAI_MODEL`），如 `deepseek-chat` |
+| API Base URL | 兼容服务地址，本地服务通常以 `/v1` 结尾；官方 OpenAI 可留空 |
+| API Key | 密钥；本地无鉴权服务填 `not-needed`。仅保存在本机 Blender 偏好中 |
+| 纹理库目录 | library 模式使用的 `<lib>/<category>/albedo.png` 根目录 |
+| 输出目录 | 场景 JSON、纹理和渲染图的默认输出位置 |
+
+粘贴配置时若混入 Tab、零宽空格等不可见字符会被自动剥离。
 
 Blender 自带 Python 无需安装 torch/openai：生成与纹理导出通过子进程调用项目 venv 完成，场景重建复用的桥接模块只依赖 `bpy` 和标准库。已在 Blender 5.2.1 LTS 上验证：插件启用、五个操作符与面板注册、导入 15 物体场景、EEVEE 无界面渲染均通过（无界面回归脚本见 `blender_addon_test.py`）。
 
