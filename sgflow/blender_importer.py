@@ -268,6 +268,7 @@ _DETAIL_LEVELS = {
     3: {"parts_limit": 6, "subdiv": 2, "smooth": True},
     4: {"parts_limit": 12, "subdiv": 2, "smooth": True},
     5: {"parts_limit": None, "subdiv": 3, "smooth": True},
+    6: {"parts_limit": None, "subdiv": 3, "smooth": True},  # L6 由 custom_mesh 接管，此配置仅兜底
 }
 
 
@@ -276,14 +277,101 @@ def _clamp_level(level):
         v = int(level)
     except Exception:
         return 3
-    return max(1, min(5, v))
+    return max(1, min(6, v))
 
 
 def _build_detail(category, detail):
-    """归一化 detail dict：确保有 parts 列表。无有效 detail 时返回空 parts（调用方会回退到 make_proxy）。"""
+    """归一化 detail dict：确保有 parts 列表。无有效 detail 时用类别模板。"""
     if isinstance(detail, dict) and isinstance(detail.get("parts"), list) and detail["parts"]:
         return {"parts": list(detail["parts"]), "smooth": bool(detail.get("smooth", True))}
-    return {"parts": [], "smooth": True}
+    # 类别模板兜底：即使 LLM 没输出 detail，也能按类别建模
+    template = _CATEGORY_TEMPLATES.get(category, _template_box)
+    return {"parts": template(), "smooth": True}
+
+
+def _part(kind, offset, size):
+    return {"kind": kind, "offset": offset, "size": size}
+
+
+def _template_box():
+    return [_part("box", (0.0, 0.0, 0.0), (1.0, 1.0, 1.0))]
+
+
+def _template_table():
+    parts = [_part("box", (0.0, 0.0, 0.49), (1.0, 1.0, 0.08))]
+    for sxn in (-1, 1):
+        for syn in (-1, 1):
+            parts.append(_part("cylinder", (sxn * 0.40, syn * 0.40, 0.225), (0.08, 0.08, 0.45)))
+    return parts
+
+
+def _template_chair():
+    parts = [
+        _part("box", (0.0, 0.0, 0.45), (1.0, 1.0, 0.08)),
+        _part("box", (0.0, 0.45, 0.70), (1.0, 0.07, 0.60)),
+    ]
+    for sxn in (-1, 1):
+        for syn in (-1, 1):
+            parts.append(_part("cylinder", (sxn * 0.42, syn * 0.42, 0.225), (0.07, 0.07, 0.45)))
+    return parts
+
+
+def _template_bed():
+    return [
+        _part("box", (0.0, 0.0, 0.25), (1.0, 1.0, 0.50)),
+        _part("box", (0.0, 0.48, 0.60), (1.0, 0.06, 0.70)),
+        _part("box", (0.0, -0.10, 0.55), (0.90, 0.80, 0.15)),
+    ]
+
+
+def _template_lamp():
+    return [
+        _part("cylinder", (0.0, 0.0, 0.05), (0.50, 0.50, 0.10)),
+        _part("cylinder", (0.0, 0.0, 0.50), (0.03, 0.03, 0.90)),
+        _part("cone", (0.0, 0.0, 0.90), (0.30, 0.30, 0.25)),
+    ]
+
+
+def _template_sofa():
+    parts = [
+        _part("box", (0.0, 0.0, 0.35), (1.0, 1.0, 0.40)),
+        _part("box", (0.0, 0.45, 0.60), (1.0, 0.12, 0.60)),
+    ]
+    for sxn in (-1, 1):
+        parts.append(_part("box", (sxn * 0.47, 0.0, 0.50), (0.08, 1.0, 0.50)))
+    return parts
+
+
+def _template_quadruped():
+    parts = [
+        _part("sphere", (0.0, 0.0, 0.55), (0.50, 0.35, 0.30)),
+        _part("sphere", (0.0, 0.42, 0.75), (0.22, 0.22, 0.22)),
+    ]
+    for sxn in (-1, 1):
+        for syn in (-1, 1):
+            parts.append(_part("cylinder", (sxn * 0.30, syn * 0.30, 0.30), (0.08, 0.08, 0.60)))
+    parts.append(_part("cylinder", (0.0, -0.48, 0.60), (0.05, 0.30, 0.05)))
+    return parts
+
+
+def _template_person():
+    return [
+        _part("sphere", (0.0, 0.0, 0.92), (0.16, 0.16, 0.14)),
+        _part("box", (0.0, 0.0, 0.55), (0.40, 0.24, 0.50)),
+        _part("cylinder", (-0.12, 0.0, 0.25), (0.10, 0.10, 0.50)),
+        _part("cylinder", (0.12, 0.0, 0.25), (0.10, 0.10, 0.50)),
+    ]
+
+
+_CATEGORY_TEMPLATES = {
+    "table": _template_table, "dining_table": _template_table, "coffee_table": _template_table,
+    "desk": _template_table, "chair": _template_chair, "armchair": _template_chair,
+    "stool": _template_chair, "bench": _template_chair, "bed": _template_bed,
+    "lamp": _template_lamp, "floor_lamp": _template_lamp, "ceiling_lamp": _template_lamp,
+    "sofa": _template_sofa, "monkey": _template_quadruped, "dog": _template_quadruped,
+    "cat": _template_quadruped, "rabbit": _template_quadruped, "horse": _template_quadruped,
+    "person": _template_person,
+}
 
 
 def _apply_level(detail, level):
@@ -345,6 +433,18 @@ def _part_mesh(name: str, kind: str, offset, size, subdiv: int, smooth: bool):
     return obj
 
 
+def _is_degenerate_mesh(mesh_data) -> bool:
+    """检测 LLM 偷懒输出：顶点构成单一轴对齐盒子（8 顶点、每轴 2 个取值）。"""
+    vertices = mesh_data.get("vertices") if isinstance(mesh_data, dict) else None
+    if not isinstance(vertices, list) or len(vertices) != 8:
+        return False
+    try:
+        axes = [{(round(float(v[axis]), 6)) for v in vertices} for axis in range(3)]
+    except (TypeError, ValueError, IndexError):
+        return False
+    return all(len(values) == 2 for values in axes)
+
+
 def _custom_mesh_object(name: str, mesh_data: dict, smooth: bool = True):
     """从顶点/面数据直接构建 mesh。vertices 是归一化坐标（±0.5 占满 OBB），faces 是顶点索引。"""
     vertices = mesh_data.get("vertices")
@@ -374,8 +474,11 @@ def build_detailed_object(name: str, category: str, detail: dict | None, level: 
                           custom_mesh: dict | None = None):
     """构建单个物体。L6 且有 custom_mesh 时直接建 mesh；否则按 detail + level 参数化。"""
     level = _clamp_level(level)
-    if level >= 6 and custom_mesh is not None:
-        return _custom_mesh_object(f"{name}_{category}", custom_mesh, smooth=True)
+    if level >= 6 and custom_mesh is not None and not _is_degenerate_mesh(custom_mesh):
+        try:
+            return _custom_mesh_object(f"{name}_{category}", custom_mesh, smooth=True)
+        except ValueError:
+            pass  # 拓扑校验失败：回退到类别模板
     spec = _build_detail(category, detail)
     spec = _apply_level(spec, level)
     if not spec["parts"]:

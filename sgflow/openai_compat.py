@@ -401,13 +401,20 @@ class OpenAICompatibleScenePipeline:
         detail_block = ""
         if detail_level >= 6:
             detail_block = (
-                "Give each object a \"custom_mesh\" with \"vertices\" and \"faces\" to model its "
-                "exact shape. Use NORMALIZED coordinates in the object's OBB-local frame: origin "
-                "at the object center, axes aligned to its yaw, and 0.5 equals half the object's "
-                "size on that axis. Faces are vertex indices (0-based). Model all visible detail "
-                "with as many vertices and faces as needed. "
+                "You MUST give EVERY object a \"custom_mesh\" with \"vertices\" and \"faces\" that "
+                "actually sculpts its silhouette. Use NORMALIZED coordinates in the object's "
+                "OBB-local frame: origin at the object center, axes aligned to its yaw, and 0.5 "
+                "equals half the object's size on that axis. Faces are vertex indices (0-based). "
+                "NEVER reduce an object to a single box: a bed has a frame, mattress, pillow and "
+                "headboard; a chair has a seat, backrest and four legs; a table has a top and legs; "
+                "a lamp has a base, pole and shade; an animal has a torso, head, legs and tail. "
+                "Compose each object by overlapping multiple simple solids (boxes, cylinders "
+                "approximated with an 8-12 sided cross-section, prisms, wedges, pyramids). "
+                "Use at least 24 vertices for simple furniture and at least 60 vertices for "
+                "organic shapes. A mesh with exactly 8 vertices and 6 quad faces is a cube and "
+                "is ALWAYS wrong for any category. "
             )
-            shape_hint = '"custom_mesh"?'
+            shape_hint = '"custom_mesh"'
         else:
             detail_block = (
                 "Optionally give each object a \"detail\" describing how to build it from primitives "
