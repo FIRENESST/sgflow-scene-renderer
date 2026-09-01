@@ -75,6 +75,13 @@ class SGFlowSceneSettings(bpy.types.PropertyGroup):
         name="生成后直接渲染",
         default=False,
     )
+    detail_level: IntProperty(
+        name="精细等级",
+        description="全局几何精细程度：1=单立方体占位，5=最多部件+最高细分+平滑着色",
+        default=3,
+        min=1,
+        max=5,
+    )
     status: StringProperty(
         name="状态",
         description="最近一次操作的结果",

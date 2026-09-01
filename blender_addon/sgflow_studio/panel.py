@@ -21,6 +21,7 @@ class SGFLOW_PT_main(bpy.types.Panel):
         row.prop(settings, "seed")
         row.prop(settings, "refine_steps")
         box.prop(settings, "device")
+        box.prop(settings, "detail_level")
         row = box.row(align=True)
         row.prop(settings, "auto_render")
         gen = box.row()

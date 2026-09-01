@@ -43,10 +43,12 @@ def _load_importer(project_dir: str):
 
 
 def build_scene_in_blender(context, project_dir: str, scene_path: str,
-                           materials_path: str | None, replace: bool):
+                           materials_path: str | None, replace: bool,
+                           detail_level: int | None = None):
     """在进程内重建场景（复用桥接校验与材质逻辑）。
 
     importer 全部走 data API，不依赖 UI context，modal 回调里可直接调用。
+    detail_level 为 None 时按 scene.json 的 metadata 或默认 3。
     """
     importer = _load_importer(project_dir)
     with open(scene_path, encoding="utf-8") as f:
@@ -55,10 +57,13 @@ def build_scene_in_blender(context, project_dir: str, scene_path: str,
     if materials_path:
         with open(materials_path, encoding="utf-8") as f:
             manifest = json.load(f)
+    if detail_level is None:
+        detail_level = context.scene.sgflow.detail_level
     return importer.build(
         scene, manifest,
         manifest_path=materials_path,
         replace_scene=replace,
+        detail_level=detail_level,
     )
 
 
@@ -157,6 +162,7 @@ class SGFLOW_OT_generate_scene(_SubprocessMixin, bpy.types.Operator):
             "--output", scene_path,
             "--refine-steps", str(settings.refine_steps),
             "--seed", str(settings.seed),
+            "--detail-level", str(settings.detail_level),
         ]
         if settings.device != "auto":
             argv += ["--device", settings.device]
@@ -172,6 +178,7 @@ class SGFLOW_OT_generate_scene(_SubprocessMixin, bpy.types.Operator):
         build_scene_in_blender(
             context, prefs.project_dir, self._scene_path, None,
             replace=settings.replace_scene,
+            detail_level=settings.detail_level,
         )
         n = len([o for o in bpy.context.scene.objects if o.type == "MESH"])
         self._set_status(context, f"已生成并导入：{n} 个网格对象")

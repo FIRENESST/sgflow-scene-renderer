@@ -14,6 +14,8 @@ SGFlow（**S**cene **G**raph **Flow**）是一个面向 Blender 渲染流程的 
                                                             ↓
                  稀疏空间关系图 + 15 轴 OBB-SAT 可微精修
                                                             ↓
+                 参数化几何建模（box/sphere/cylinder/cone 部件 + 1-5 级精细度）
+                                                            ↓
                  SceneGraph JSON -> 纹理 -> Blender 重建/渲染
 ```
 
@@ -26,6 +28,7 @@ SGFlow（**S**cene **G**raph **Flow**）是一个面向 Blender 渲染流程的 
 - 程序纹理每个对象使用 17 个 `O(1)` 控制量（4 个类型混合、6 个颜色、7 个图案/材质标量），光栅化成 Albedo、单通道 Roughness 和 Normal。
 - 默认碰撞层使用完整 15 分离轴 OBB-SAT；可切回旧版世界 AABB 快速近似。屏蔽的 PAD 槽不会被当成隐形支撑物。
 - API 后端采用“语义规划与几何求解分离”：大模型给出物体、米制 OBB 初值和稀疏关系，本地优化器负责物理边界与关系落地。
+- **参数化几何建模**：在布局求解之后，每个物体按类别模板或 LLM 给出的部件描述（box/sphere/cylinder/cone）组装成多部件 mesh。全局精细等级 1–5 控制部件数量上限、球/柱细分级别和平滑着色。等级 1 为单立方体占位；等级 5 保留全部部件和最高细分。
 
 ## 安装
 
@@ -102,11 +105,15 @@ $env:OPENAI_MODEL = "你的模型名"
 $env:OPENAI_BASE_URL = "http://127.0.0.1:8000/v1"
 # 无鉴权的本地服务可使用占位值
 $env:OPENAI_API_KEY = "not-needed"
+```
 
+```powershell
 .\.venv\Scripts\sgflow-openai.exe `
   "一间温馨的卧室，有双人床、两个床头灯和一张书桌" `
-  --output scene.json --seed 7
+  --output scene.json --seed 7 --detail-level 3
 ```
+
+`--detail-level 1..5` 控制全局几何精细程度，默认 3。等级越高，每个物体保留的参数化部件越多、球/柱细分越高。
 
 也可以直接使用 Python API：
 
@@ -189,6 +196,7 @@ textures_lib/
 - **② 场景导入**：选择已有场景 JSON（可选材质清单），在进程内复用 `sgflow/blender_importer.py` 的校验与材质逻辑重建。
 - **③ 纹理导出**：library / generated 模式，调用 `sgflow.tex_assets` 子进程。
 - **④ 渲染**：自动选择 Eevee 引擎，输出到指定路径（未保存的 `.blend` 会自动落到插件偏好的输出目录，避免写到 `C:\` 根目录）。
+- **⑤ 精细等级**：1–5 滑块控制参数化部件数量、细分和平滑着色；1=单立方体占位，5=最高细节。面板设置会传给生成子进程并影响导入重建。
 - 底部状态栏显示最近结果，可一键打开输出目录。
 
 场景重建全部走 `bpy.data` 数据 API（不依赖 `bpy.ops` 的 UI context），因此在模态回调和后台模式下行为一致。
@@ -268,7 +276,7 @@ blender --background --python sgflow/blender_importer.py -- scene.json textures_
 .\.venv\Scripts\sgflow-doctor.exe --probe-blender --blender "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"
 ```
 
-当前重建器使用立方体代理，尚未实现按类别链接 Blender Collection 资产库。
+- 当前重建器支持参数化多部件建模；等级 5 会保留全部部件。后续计划接入 Blender Collection 资产库作为等级 5 的精模回退。
 
 ## 训练数据
 
@@ -360,6 +368,7 @@ sgflow/
 ├── constraints.py      # OBB/AABB 碰撞、边界与支撑约束
 ├── spatial.py          # 稀疏空间关系图 + 15 轴 OBB-SAT 布局求解
 ├── openai_compat.py    # OpenAI Chat Completions 兼容规划器与 CLI
+├── procedural_geometry.py # 类别参数化模板与精细等级控制
 ├── runtime.py          # Python/Torch/OpenAI/Blender 运行时诊断
 ├── pipeline.py         # 本地检查点后端与 OpenAI 兼容工厂入口
 ├── train.py            # 可恢复、可复现的训练循环

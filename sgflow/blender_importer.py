@@ -247,9 +247,8 @@ def rot6d_to_mat3(r6):
 
 
 def make_proxy(name: str, category: str):
-    """用 data API 建一个单位立方体代理，直到接入资产库。"""
+    """单立方体代理（无细节信息时的兜底）。"""
     mesh = bpy.data.meshes.new(f"mesh_{name}")
-    # 单位立方体：8 顶点 6 四边面
     verts = [(-0.5, -0.5, -0.5), (-0.5, -0.5, 0.5), (-0.5, 0.5, 0.5), (-0.5, 0.5, -0.5),
              (0.5, -0.5, -0.5), (0.5, -0.5, 0.5), (0.5, 0.5, 0.5), (0.5, 0.5, -0.5)]
     faces = [(0, 1, 2, 3), (7, 6, 5, 4), (4, 5, 1, 0), (5, 6, 2, 1),
@@ -259,6 +258,110 @@ def make_proxy(name: str, category: str):
     obj = bpy.data.objects.new(f"{name}_{category}", mesh)
     bpy.context.scene.collection.objects.link(obj)
     return obj
+
+
+# ---- 精细等级与参数化部件建模（自包含，不依赖 sgflow 包上下文） ----
+
+_DETAIL_LEVELS = {
+    1: {"parts_limit": 1, "subdiv": 0, "smooth": False},
+    2: {"parts_limit": 3, "subdiv": 1, "smooth": False},
+    3: {"parts_limit": 6, "subdiv": 2, "smooth": True},
+    4: {"parts_limit": 12, "subdiv": 2, "smooth": True},
+    5: {"parts_limit": None, "subdiv": 3, "smooth": True},
+}
+
+
+def _clamp_level(level):
+    try:
+        v = int(level)
+    except Exception:
+        return 3
+    return max(1, min(5, v))
+
+
+def _build_detail(category, detail):
+    """归一化 detail dict：确保有 parts 列表。无有效 detail 时返回空 parts（调用方会回退到 make_proxy）。"""
+    if isinstance(detail, dict) and isinstance(detail.get("parts"), list) and detail["parts"]:
+        return {"parts": list(detail["parts"]), "smooth": bool(detail.get("smooth", True))}
+    return {"parts": [], "smooth": True}
+
+
+def _apply_level(detail, level):
+    spec = _DETAIL_LEVELS[_clamp_level(level)]
+    parts = detail["parts"]
+    limit = spec["parts_limit"]
+    if limit is not None:
+        parts = parts[:limit]
+    return {
+        "parts": parts,
+        "smooth": bool(detail.get("smooth", True)) and spec["smooth"],
+        "subdiv": spec["subdiv"],
+    }
+
+
+def _read_detail_level(scene):
+    """从 scene JSON 的 metadata 或根级字段读取精细等级，默认 3。"""
+    if not isinstance(scene, dict):
+        return 3
+    for key in ("detail_level", "geometry_detail_level"):
+        for root in (scene, scene.get("metadata", {})):
+            val = root.get(key)
+            if val is not None:
+                return _clamp_level(val)
+    return 3
+
+
+def _part_mesh(name: str, kind: str, offset, size, subdiv: int, smooth: bool):
+    """构建单个部件。offset/size 是物体 OBB 归一化局部坐标（±0.5 占满整个 OBB）。"""
+    import bmesh
+    bm = bmesh.new()
+    try:
+        if kind == "box":
+            bmesh.ops.create_cube(bm, size=1.0)
+        elif kind == "sphere":
+            seg = 8 * (2 ** subdiv)
+            bmesh.ops.create_uvsphere(bm, u_segments=max(8, seg), v_segments=max(4, seg // 2), radius=0.5)
+        elif kind == "cylinder":
+            seg = 8 * (2 ** subdiv)
+            bmesh.ops.create_cone(bm, cap_ends=True, cap_tris=False, segments=max(8, seg),
+                                  radius1=0.5, radius2=0.5, depth=1.0)
+        elif kind == "cone":
+            seg = 8 * (2 ** subdiv)
+            bmesh.ops.create_cone(bm, cap_ends=True, cap_tris=False, segments=max(8, seg),
+                                  radius1=0.5, radius2=0.0, depth=1.0)
+        else:
+            bmesh.ops.create_cube(bm, size=1.0)
+        mesh = bpy.data.meshes.new(f"mesh_{name}")
+        bm.to_mesh(mesh)
+        mesh.update()
+    finally:
+        bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    obj.location = Vector(offset)
+    obj.scale = Vector(size)
+    if smooth:
+        for poly in mesh.polygons:
+            poly.use_smooth = True
+    return obj
+
+
+def build_detailed_object(name: str, category: str, detail: dict, level: int):
+    """按 detail + level 构建一个多部件物体，返回父空物体；无有效部件时返回 None。"""
+    level = _clamp_level(level)
+    spec = _build_detail(category, detail)
+    spec = _apply_level(spec, level)
+    if not spec["parts"]:
+        return None
+    parent = bpy.data.objects.new(f"{name}_{category}", None)
+    bpy.context.scene.collection.objects.link(parent)
+    for idx, part in enumerate(spec["parts"]):
+        child = _part_mesh(
+            f"{name}_p{idx:02d}", part["kind"], part["offset"], part["size"],
+            spec["subdiv"], spec["smooth"],
+        )
+        child.parent = parent
+        bpy.context.scene.collection.objects.link(child)
+    return parent
 
 
 def _principled_bsdf(node_tree):
@@ -318,7 +421,7 @@ def _build_material(name: str, entry: dict | None, fallback_rgb, image_cache: di
     return mat
 
 
-def build(scene: dict, materials_manifest: dict | None = None, *, manifest_path: str | None = None, replace_scene: bool = False):
+def build(scene: dict, materials_manifest: dict | None = None, *, manifest_path: str | None = None, replace_scene: bool = False, detail_level: int | None = None):
     objects = validate_scene_payload(scene)
     mat_by_idx = (
         validate_material_manifest(
@@ -329,10 +432,24 @@ def build(scene: dict, materials_manifest: dict | None = None, *, manifest_path:
     )
     if replace_scene:
         clear_scene()
+    object_details = None
+    if isinstance(scene, dict):
+        meta = scene.get("metadata")
+        if isinstance(meta, dict) and isinstance(meta.get("object_details"), list):
+            object_details = meta["object_details"]
+    if detail_level is None:
+        detail_level = _read_detail_level(scene)
     image_cache: dict[str, object] = {}
     material_cache: dict[tuple, object] = {}
     for i, o in enumerate(objects):
-        obj = make_proxy(f"obj{i:03d}", o["category"])
+        detail = None
+        if object_details is not None and i < len(object_details):
+            detail = object_details[i]
+        obj = None
+        if detail is not None:
+            obj = build_detailed_object(f"obj{i:03d}", o["category"], detail, detail_level)
+        if obj is None:
+            obj = make_proxy(f"obj{i:03d}", o["category"])
         t, s, R = Vector(o["position"]), Vector(o["scale"]), rot6d_to_mat3(o["rotation6d"])
         obj.matrix_world = Matrix.Translation(t) @ R.to_4x4() @ Matrix.Diagonal((*s, 1.0))
         entry = mat_by_idx.get(i)
@@ -343,7 +460,11 @@ def build(scene: dict, materials_manifest: dict | None = None, *, manifest_path:
             mat = _build_material(f"mat_{o['category']}_{i:03d}", entry, fallback, image_cache)
             if signature:
                 material_cache[signature] = mat
-        obj.data.materials.append(mat)
+        # 多部件物体：材质挂到所有子部件；单代理：直接挂
+        targets = [obj] + list(obj.children) if obj.children else [obj]
+        for target in targets:
+            if target.data is not None and hasattr(target.data, "materials"):
+                target.data.materials.append(mat)
     # 地面 / 相机 / 太阳灯：全部走 data API，后台与 UI 行为一致
     ground_mesh = bpy.data.meshes.new("mesh_ground")
     s = 25.0

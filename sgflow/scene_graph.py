@@ -93,9 +93,11 @@ class SceneGraph:
     def morton_sorted(self) -> "SceneGraph":
         idx = torch.arange(self.n, device=self.pos.device) if self.n == 0 else morton_order(self.pos)
         metadata = dict(self.metadata)
-        object_ids = metadata.get("object_ids")
-        if isinstance(object_ids, list) and len(object_ids) == self.n:
-            metadata["object_ids"] = [object_ids[int(index)] for index in idx.cpu()]
+        order = [int(index) for index in idx.cpu()]
+        for key in ("object_ids", "object_details"):
+            values = metadata.get(key)
+            if isinstance(values, list) and len(values) == self.n:
+                metadata[key] = [values[i] for i in order]
         return SceneGraph(
             self.categories, self.cat[idx], self.pos[idx], self.rot6d[idx],
             self.log_scale[idx], self.appearance[idx], metadata=metadata,

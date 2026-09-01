@@ -65,6 +65,7 @@ class PlannedObject:
     position: tuple[float, float, float]
     size: tuple[float, float, float]
     yaw_degrees: float
+    detail: dict[str, Any] | None = None  # 可选参数化几何描述 {"parts": [...], "smooth": bool}
 
 
 @dataclass(frozen=True)
@@ -113,12 +114,16 @@ class SpatialPlan:
             yaw = raw.get("yaw_degrees", 0.0)
             if isinstance(yaw, bool) or not isinstance(yaw, Real) or not math.isfinite(float(yaw)):
                 raise ValueError(f"objects[{index}].yaw_degrees must be a finite number")
+            detail = raw.get("detail")
+            if detail is not None and not isinstance(detail, dict):
+                raise ValueError(f"objects[{index}].detail must be an object or omitted")
             objects.append(PlannedObject(
                 object_id=object_id,
                 category=category,
                 position=_finite_vector(raw.get("position"), 3, f"objects[{index}].position"),
                 size=_finite_vector(raw.get("size"), 3, f"objects[{index}].size", positive=True),
                 yaw_degrees=float(yaw),
+                detail=dict(detail) if detail is not None else None,
             ))
 
         relations: list[SpatialRelation] = []
@@ -144,17 +149,8 @@ class SpatialPlan:
         return cls(tuple(objects), tuple(relations))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "objects": [
-                {
-                    "id": item.object_id,
-                    "category": item.category,
-                    "position": list(item.position),
-                    "size": list(item.size),
-                    "yaw_degrees": item.yaw_degrees,
-                }
-                for item in self.objects
-            ],
+        out = {
+            "objects": [],
             "relations": [
                 {
                     "subject_id": edge.subject_id,
@@ -164,6 +160,18 @@ class SpatialPlan:
                 for edge in self.relations
             ],
         }
+        for item in self.objects:
+            obj = {
+                "id": item.object_id,
+                "category": item.category,
+                "position": list(item.position),
+                "size": list(item.size),
+                "yaw_degrees": item.yaw_degrees,
+            }
+            if item.detail is not None:
+                obj["detail"] = item.detail
+            out["objects"].append(obj)
+        return out
 
 
 def yaw_to_matrix(yaw: torch.Tensor) -> torch.Tensor:
@@ -361,6 +369,9 @@ def refine_spatial_plan(
         "object_ids": [item.object_id for item in plan.objects],
         "relations": plan.to_dict()["relations"],
     }
+    details = [item.detail for item in plan.objects]
+    if any(detail is not None for detail in details):
+        metadata["object_details"] = details
     if model:
         metadata["model"] = model
     return SceneGraph(

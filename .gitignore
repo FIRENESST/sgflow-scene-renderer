@@ -25,3 +25,6 @@ tex_*_out/
 tex_cpu_check/
 blender_out/
 blender_addon_test_result.json
+
+# Blender addon junction (dev convenience for BLENDER_USER_SCRIPTS)
+blender_addon/addons/
