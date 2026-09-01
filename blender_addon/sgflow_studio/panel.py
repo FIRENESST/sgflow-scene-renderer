@@ -17,11 +17,20 @@ class SGFLOW_PT_main(bpy.types.Panel):
         box = layout.box()
         box.label(text="① 提示词生成", icon="TEXT")
         box.prop(settings, "prompt")
+        box.prop(settings, "backend")
+        if settings.backend == "checkpoint":
+            box.prop(settings, "checkpoint")
         row = box.row(align=True)
         row.prop(settings, "seed")
         row.prop(settings, "refine_steps")
         box.prop(settings, "device")
-        box.prop(settings, "detail_level")
+        detail_row = box.row()
+        if settings.backend == "checkpoint":
+            detail_row.prop(settings, "detail_level", text="精细等级 (1-5)")
+            detail_row.enabled = False
+            box.label(text="本地检查点暂不支持 L6", icon="INFO")
+        else:
+            box.prop(settings, "detail_level")
         row = box.row(align=True)
         row.prop(settings, "auto_render")
         gen = box.row()

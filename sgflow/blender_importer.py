@@ -312,7 +312,7 @@ def _read_detail_level(scene):
 
 
 def _part_mesh(name: str, kind: str, offset, size, subdiv: int, smooth: bool):
-    """构建单个部件。offset/size 是物体 OBB 归一化局部坐标（±0.5 占满整个 OBB）。"""
+    """构建单个参数化部件。offset/size 是物体 OBB 归一化局部坐标（±0.5 占满整个 OBB）。"""
     import bmesh
     bm = bmesh.new()
     try:
@@ -345,9 +345,37 @@ def _part_mesh(name: str, kind: str, offset, size, subdiv: int, smooth: bool):
     return obj
 
 
-def build_detailed_object(name: str, category: str, detail: dict, level: int):
-    """按 detail + level 构建一个多部件物体，返回父空物体；无有效部件时返回 None。"""
+def _custom_mesh_object(name: str, mesh_data: dict, smooth: bool = True):
+    """从顶点/面数据直接构建 mesh。vertices 是归一化坐标（±0.5 占满 OBB），faces 是顶点索引。"""
+    vertices = mesh_data.get("vertices")
+    faces = mesh_data.get("faces")
+    if not isinstance(vertices, list) or not isinstance(faces, list):
+        raise ValueError("custom_mesh must contain vertices and faces lists")
+    verts = [Vector(v) for v in vertices]
+    # 校验面索引
+    n = len(verts)
+    for fi, face in enumerate(faces):
+        if not isinstance(face, list) or len(face) < 3:
+            raise ValueError(f"face {fi} must have at least 3 vertices")
+        if any(not isinstance(idx, int) or idx < 0 or idx >= n for idx in face):
+            raise ValueError(f"face {fi} has invalid vertex index")
+    mesh = bpy.data.meshes.new(f"mesh_{name}")
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    if smooth:
+        for poly in mesh.polygons:
+            poly.use_smooth = True
+    return obj
+
+
+def build_detailed_object(name: str, category: str, detail: dict | None, level: int,
+                          custom_mesh: dict | None = None):
+    """构建单个物体。L6 且有 custom_mesh 时直接建 mesh；否则按 detail + level 参数化。"""
     level = _clamp_level(level)
+    if level >= 6 and custom_mesh is not None:
+        return _custom_mesh_object(f"{name}_{category}", custom_mesh, smooth=True)
     spec = _build_detail(category, detail)
     spec = _apply_level(spec, level)
     if not spec["parts"]:
@@ -433,21 +461,27 @@ def build(scene: dict, materials_manifest: dict | None = None, *, manifest_path:
     if replace_scene:
         clear_scene()
     object_details = None
+    custom_meshes = None
     if isinstance(scene, dict):
         meta = scene.get("metadata")
-        if isinstance(meta, dict) and isinstance(meta.get("object_details"), list):
-            object_details = meta["object_details"]
+        if isinstance(meta, dict):
+            if isinstance(meta.get("object_details"), list):
+                object_details = meta["object_details"]
+            if isinstance(meta.get("custom_meshes"), list):
+                custom_meshes = meta["custom_meshes"]
     if detail_level is None:
         detail_level = _read_detail_level(scene)
     image_cache: dict[str, object] = {}
     material_cache: dict[tuple, object] = {}
     for i, o in enumerate(objects):
         detail = None
+        custom_mesh = None
         if object_details is not None and i < len(object_details):
             detail = object_details[i]
-        obj = None
-        if detail is not None:
-            obj = build_detailed_object(f"obj{i:03d}", o["category"], detail, detail_level)
+        if custom_meshes is not None and i < len(custom_meshes):
+            custom_mesh = custom_meshes[i]
+        obj = build_detailed_object(f"obj{i:03d}", o["category"], detail, detail_level,
+                                    custom_mesh=custom_mesh)
         if obj is None:
             obj = make_proxy(f"obj{i:03d}", o["category"])
         t, s, R = Vector(o["position"]), Vector(o["scale"]), rot6d_to_mat3(o["rotation6d"])

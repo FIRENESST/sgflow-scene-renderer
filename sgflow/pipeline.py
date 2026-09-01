@@ -77,7 +77,8 @@ class ScenePipeline:
             self.texhead.eval()
         self.flow = RectifiedFlow(self.cfg)
 
-    def generate(self, prompt: str, steps: int = None, refine_steps: int = 8, seed: int = None) -> SceneGraph:
+    def generate(self, prompt: str, steps: int = None, refine_steps: int = 8, seed: int = None,
+                 detail_level: int | None = None) -> SceneGraph:
         """一句话生成场景：结构采样 -> 几何流生成 -> 约束精修"""
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
@@ -85,6 +86,8 @@ class ScenePipeline:
             raise ValueError("refine_steps must be a non-negative integer")
         if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
             raise ValueError("seed must be an integer or None")
+        if detail_level is not None:
+            detail_level = max(1, min(5, int(detail_level)))  # 检查点模式不支持 L6
         generator = torch.Generator(device=self.device)
         actual_seed = int(seed) if seed is not None else generator.seed()
         if seed is not None:
@@ -130,7 +133,10 @@ class ScenePipeline:
         z[..., 9:12] = z[..., 9:12].clamp(-4.0, 2.0)
         keep = mask[0]
         sg = SceneGraph.from_latent(z[0, keep].cpu(), cat[0, keep].cpu(), self.cfg.categories)
-        return sg.morton_sorted()
+        sg = sg.morton_sorted()
+        if detail_level is not None:
+            sg.metadata["detail_level"] = detail_level
+        return sg
 
     def _refine(self, z, cat, mask, steps: int):
         """对潜变量做几步梯度下降，消除穿模 / 悬空 / 越界"""
@@ -149,3 +155,34 @@ class ScenePipeline:
             loss.backward()
             opt.step()
         return z.detach()
+
+
+def main(argv: list[str] | None = None) -> None:
+    """本地检查点后端的命令行入口。"""
+    import argparse
+    import os
+    from .config import SGFlowConfig
+
+    parser = argparse.ArgumentParser(description="Generate an SGFlow scene from a local checkpoint")
+    parser.add_argument("prompt", help="natural-language scene description")
+    parser.add_argument("--checkpoint", required=True, help="sgflow_ckpt.pt path")
+    parser.add_argument("--output", default="scene.json")
+    parser.add_argument("--device", default=None, help="defaults to SGFlow device configuration")
+    parser.add_argument("--refine-steps", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--detail-level", type=int, default=None, help="geometry detail level 1-5")
+    args = parser.parse_args(argv)
+
+    pipeline = ScenePipeline(checkpoint=args.checkpoint, device=args.device)
+    scene = pipeline.generate(
+        args.prompt,
+        refine_steps=args.refine_steps,
+        seed=args.seed,
+        detail_level=args.detail_level,
+    )
+    scene.to_json(args.output)
+    print(f"wrote {scene.n} objects to {os.path.abspath(args.output)}")
+
+
+if __name__ == "__main__":
+    main()

@@ -150,20 +150,34 @@ class SGFLOW_OT_generate_scene(_SubprocessMixin, bpy.types.Operator):
         if not os.path.isfile(prefs.python_exe):
             self.report({"ERROR"}, f"项目 Python 不存在：{prefs.python_exe}（请在插件偏好中修正）")
             return {"CANCELLED"}
-        if not prefs.openai_model:
+        if settings.backend == "llm" and not prefs.openai_model:
             self.report({"ERROR"}, "请先在插件偏好中填写模型名（OPENAI_MODEL）")
+            return {"CANCELLED"}
+        if settings.backend == "checkpoint" and not os.path.isfile(settings.checkpoint):
+            self.report({"ERROR"}, f"检查点不存在：{settings.checkpoint}（请先生成或下载）")
             return {"CANCELLED"}
         out_dir = bpy.path.abspath(prefs.output_dir)
         os.makedirs(out_dir, exist_ok=True)
         scene_path = os.path.join(out_dir, "scene.json")
-        argv = [
-            prefs.python_exe, "-m", "sgflow.openai_compat",
-            settings.prompt,
-            "--output", scene_path,
-            "--refine-steps", str(settings.refine_steps),
-            "--seed", str(settings.seed),
-            "--detail-level", str(settings.detail_level),
-        ]
+        if settings.backend == "llm":
+            argv = [
+                prefs.python_exe, "-m", "sgflow.openai_compat",
+                settings.prompt,
+                "--output", scene_path,
+                "--refine-steps", str(settings.refine_steps),
+                "--seed", str(settings.seed),
+                "--detail-level", str(settings.detail_level),
+            ]
+        else:
+            argv = [
+                prefs.python_exe, "-m", "sgflow.pipeline",
+                settings.prompt,
+                "--checkpoint", settings.checkpoint,
+                "--output", scene_path,
+                "--refine-steps", str(settings.refine_steps),
+                "--seed", str(settings.seed),
+                "--detail-level", str(min(settings.detail_level, 5)),
+            ]
         if settings.device != "auto":
             argv += ["--device", settings.device]
         env = dict(os.environ)

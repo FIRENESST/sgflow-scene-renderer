@@ -75,12 +75,21 @@ class SGFlowSceneSettings(bpy.types.PropertyGroup):
         name="生成后直接渲染",
         default=False,
     )
+    backend: EnumProperty(
+        name="生成后端",
+        description="场景生成使用 LLM 还是本地 SGFlow 检查点",
+        items=(
+            ("llm", "LLM（OpenAI 兼容）", "调用远程大模型生成场景"),
+            ("checkpoint", "本地检查点", "使用本地训练好的 SGFlow 模型（需 sgflow_ckpt.pt）"),
+        ),
+        default="llm",
+    )
     detail_level: IntProperty(
         name="精细等级",
-        description="全局几何精细程度：1=单立方体占位，5=最多部件+最高细分+平滑着色",
+        description="全局几何精细程度：1=单立方体占位，5=最高参数化细节，6=AI 自由建模（仅 LLM）",
         default=3,
         min=1,
-        max=5,
+        max=6,
     )
     status: StringProperty(
         name="状态",

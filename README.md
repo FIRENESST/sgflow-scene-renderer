@@ -22,13 +22,20 @@ SGFlow（**S**cene **G**raph **Flow**）是一个面向 Blender 渲染流程的 
 核心设计：
 
 - 整流流匹配用直线插值路径训练，推理通常使用 8–16 个 ODE 步。
+
 - 潜瓶颈注意力将文本注入 K 个潜向量，复杂度为 `O((N + L) * K)`。
+
 - 选择性 SSM 以 `O(N * d_state)` 顺序扫描混合对象；当前使用 CPU/CUDA 通用、可求导的 PyTorch 参考实现。
+
 - 6D 旋转表示用 Gram–Schmidt 转为 `SO(3)`，并对零向量/共线输入提供稳定正交补全。
+
 - 程序纹理每个对象使用 17 个 `O(1)` 控制量（4 个类型混合、6 个颜色、7 个图案/材质标量），光栅化成 Albedo、单通道 Roughness 和 Normal。
+
 - 默认碰撞层使用完整 15 分离轴 OBB-SAT；可切回旧版世界 AABB 快速近似。屏蔽的 PAD 槽不会被当成隐形支撑物。
+
 - API 后端采用“语义规划与几何求解分离”：大模型给出物体、米制 OBB 初值和稀疏关系，本地优化器负责物理边界与关系落地。
-- **参数化几何建模**：在布局求解之后，每个物体按类别模板或 LLM 给出的部件描述（box/sphere/cylinder/cone）组装成多部件 mesh。全局精细等级 1–5 控制部件数量上限、球/柱细分级别和平滑着色。等级 1 为单立方体占位；等级 5 保留全部部件和最高细分。
+
+- **参数化几何建模**：在布局求解之后，每个物体按类别模板或 LLM 给出的部件描述（box/sphere/cylinder/cone）组装成多部件 mesh。全局精细等级 1–6 控制部件数量上限、球/柱细分级别和平滑着色。等级 1 为单立方体占位；等级 5 保留全部部件和最高细分；**等级 6 为 AI 自由建模**：LLM 直接输出物体的顶点与面（`custom_mesh`），可表达任意凸多面体，仅支持 LLM 后端。
 
 ## 安装
 
@@ -75,9 +82,13 @@ $env:SGFLOW_DEVICE = "cpu"
 RTX 30（Ampere）、RTX 40（Ada）和 RTX 50（Blackwell）共享以下自动优化：
 
 - `amp_dtype="auto"`：运行时查询 BF16 能力，支持时优先 BF16，否则使用 FP16；FP16 才启用 GradScaler。
+
 - RTX 30 及以上默认开启 TF32，加速仍需 FP32 的矩阵乘。
+
 - 固定形状卷积启用 cuDNN benchmark；注意力继续由 PyTorch SDPA 自动选择 Flash/高效后端。
+
 - 推理模型段使用 autocast，关系约束与 OBB 几何精修强制回到 FP32。
+
 - `torch.compile` 若在 Windows、Triton或具体算子上首次执行失败，会警告并恢复 eager，不会让长任务直接中断。
 
 需要完全保守的数值路径时可设置 `use_amp=False`、`cuda_allow_tf32=False` 和 `use_compile=False`。
@@ -120,11 +131,23 @@ $env:OPENAI_API_KEY = "not-needed"
 ```python
 from sgflow import ScenePipeline
 
+# LLM 后端
 pipeline = ScenePipeline.from_openai()  # 默认读取 OPENAI_* 环境变量
 scene = pipeline.generate(
     "a compact studio with a bed, a desk and a reading lamp",
     refine_steps=96,
     seed=7,
+    detail_level=3,
+)
+scene.to_json("scene.json")
+
+# 本地检查点后端（需要已训练的检查点）
+pipeline = ScenePipeline(checkpoint="sgflow_ckpt.pt")
+scene = pipeline.generate(
+    "a compact studio with a bed, a desk and a reading lamp",
+    refine_steps=8,
+    seed=7,
+    detail_level=3,  # 检查点后端最高 5，不支持 L6
 )
 scene.to_json("scene.json")
 ```
@@ -192,11 +215,16 @@ textures_lib/
 
 `blender_addon/sgflow_studio/` 是 Blender 4.2+/5.x 扩展格式的图形界面插件，在 3D 视口侧边栏（按 `N`）提供 “SGFlow” 标签页：
 
-- **① 提示词生成**：输入自然语言，调用项目 venv 的 `sgflow.openai_compat` 生成场景并自动导入（子进程模态执行，不冻结 UI；可选生成后直接渲染）。
+- **① 提示词生成**：输入自然语言，选择后端（LLM / 本地检查点），调用项目 venv 生成场景并自动导入。LLM 后端支持 L1–L6；检查点后端支持 L1–L5。
+
 - **② 场景导入**：选择已有场景 JSON（可选材质清单），在进程内复用 `sgflow/blender_importer.py` 的校验与材质逻辑重建。
+
 - **③ 纹理导出**：library / generated 模式，调用 `sgflow.tex_assets` 子进程。
+
 - **④ 渲染**：自动选择 Eevee 引擎，输出到指定路径（未保存的 `.blend` 会自动落到插件偏好的输出目录，避免写到 `C:\` 根目录）。
-- **⑤ 精细等级**：1–5 滑块控制参数化部件数量、细分和平滑着色；1=单立方体占位，5=最高细节。面板设置会传给生成子进程并影响导入重建。
+
+- **⑤ 精细等级**：1–6 滑块控制几何精细程度。1=单立方体占位；2–5=参数化部件数量+细分递增；6=AI 自由建模（LLM 直接输出顶点与面，仅 LLM 后端可用）。面板设置会传给生成子进程并影响导入重建。
+
 - 底部状态栏显示最近结果，可一键打开输出目录。
 
 场景重建全部走 `bpy.data` 数据 API（不依赖 `bpy.ops` 的 UI context），因此在模态回调和后台模式下行为一致。
@@ -224,6 +252,7 @@ textures_lib/
 也可以把 `blender_addon/sgflow_studio/` 整个文件夹复制到 Blender 用户插件目录后重启：
 
 - 安装版：`%APPDATA%\Blender Foundation\Blender\<版本>\scripts\addons\`
+
 - Store 版：`%LOCALAPPDATA%\Packages\BlenderFoundation.Blender_ppwjx1n5r4v9t\LocalCache\Roaming\Blender Foundation\Blender\<版本>\scripts\addons\`
 
 复制方式在源码更新后需要重新同步，开发期不建议。
@@ -232,15 +261,15 @@ textures_lib/
 
 展开插件偏好，填写：
 
-| 字段 | 说明 |
-|---|---|
-| SGFlow 项目目录 | 仓库根目录（含 `sgflow/` 包） |
-| 项目 Python | `.venv\Scripts\python.exe`（需已装 torch/openai） |
-| 模型名 | OpenAI 兼容模型名（对应 `OPENAI_MODEL`），如 `deepseek-chat` |
-| API Base URL | 兼容服务地址，本地服务通常以 `/v1` 结尾；官方 OpenAI 可留空 |
-| API Key | 密钥；本地无鉴权服务填 `not-needed`。仅保存在本机 Blender 偏好中 |
-| 纹理库目录 | library 模式使用的 `<lib>/<category>/albedo.png` 根目录 |
-| 输出目录 | 场景 JSON、纹理和渲染图的默认输出位置 |
+| 字段           | 说明                                                |
+| ------------ | ------------------------------------------------- |
+| SGFlow 项目目录  | 仓库根目录（含 `sgflow/` 包）                              |
+| 项目 Python    | `.venv\Scripts\python.exe`（需已装 torch/openai）      |
+| 模型名          | OpenAI 兼容模型名（对应 `OPENAI_MODEL`），如 `deepseek-chat` |
+| API Base URL | 兼容服务地址，本地服务通常以 `/v1` 结尾；官方 OpenAI 可留空             |
+| API Key      | 密钥；本地无鉴权服务填 `not-needed`。仅保存在本机 Blender 偏好中       |
+| 纹理库目录        | library 模式使用的 `<lib>/<category>/albedo.png` 根目录   |
+| 输出目录         | 场景 JSON、纹理和渲染图的默认输出位置                             |
 
 粘贴配置时若混入 Tab、零宽空格等不可见字符会被自动剥离。
 
@@ -276,7 +305,7 @@ blender --background --python sgflow/blender_importer.py -- scene.json textures_
 .\.venv\Scripts\sgflow-doctor.exe --probe-blender --blender "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"
 ```
 
-- 当前重建器支持参数化多部件建模；等级 5 会保留全部部件。后续计划接入 Blender Collection 资产库作为等级 5 的精模回退。
+- L6 自由建模依赖 LLM 直接输出顶点与面，模型需要足够强的空间推理能力；输出若拓扑错误（自相交/非流形）会在 Blender 侧校验失败并回退到参数化代理。当前仅 LLM 后端支持 L6，检查点后端最高 L5。
 
 ## 训练数据
 
@@ -302,9 +331,13 @@ blender --background --python sgflow/blender_importer.py -- scene.json textures_
 检查点包含：
 
 - 完整 `SGFlowConfig` 和类别词表
+
 - SceneDenoiser 权重
+
 - 文本后端类型与可训练投影（不重复保存冻结 MiniLM/哈希表）
+
 - TexHead 权重
+
 - optimizer、AMP scaler、epoch 和训练摘要
 
 恢复训练：
@@ -318,30 +351,34 @@ blender --background --python sgflow/blender_importer.py -- scene.json textures_
 ## 场景与材质协议
 
 - `SceneGraph.to_json()` 写出 `schema_version: 1`，使用原子替换；读取器仍接受没有版本字段的旧 JSON。
+
 - 可选的顶层 `metadata` 必须是有限、可 JSON 序列化的数据；旧版读取路径保持兼容。
+
 - 空场景以形状正确的 `(0, *)` 张量表示，可排序、序列化和进入纹理导出。
+
 - `materials.json` 写出 `manifest_version: 1`；Blender 侧仍兼容无版本的旧清单。
+
 - 所有生成纹理随机性来自场景指纹 + 显式 `seed`，不依赖 Python 进程级盐化 `hash()`。
 
 ## 核心配置
 
-| 参数 | 默认值 | 说明 |
-|---|---:|---|
-| `max_objects` | `128` | 模型槽位上限 |
-| `max_generated_objects` | `min(32, max_objects)` | 默认推理输出上限，防止低质量检查点填满所有槽位 |
-| `flow_steps` | `16` | 整流 ODE 步数 |
-| `d_model` / `n_layers` | `256` / `4` | 模型宽度 / 深度 |
-| `n_latents` | `32` | 文本潜瓶颈 K |
-| `room_size` | `(8, 8, 4)` | 约束层房间尺寸 |
-| `collision_mode` | `obb` | `obb`=15 轴有向盒 SAT；`aabb`=旧快速近似 |
-| `texture_mode` | `generated` | `generated` / `library` |
-| `texture_batch_size` | `16` | 生成纹理的分批对象数 |
-| `texture_size_limit` | `4096` | 单边像素硬上限 |
-| `texture_train_size` | `16` | 训练正则使用的可微纹理预览边长 |
-| `use_amp` / `use_compile` | `True` / `True` | 仅 CUDA 训练/推理时生效 |
-| `amp_dtype` | `auto` | 自动 BF16/FP16，或固定 `float16` / `bfloat16` |
-| `cuda_allow_tf32` | `True` | RTX 30+ FP32 Tensor Core 加速 |
-| `cuda_cudnn_benchmark` | `True` | 固定形状卷积内核自动择优 |
+| 参数                        |                    默认值 | 说明                                      |
+| ------------------------- | ---------------------: | --------------------------------------- |
+| `max_objects`             |                  `128` | 模型槽位上限                                  |
+| `max_generated_objects`   | `min(32, max_objects)` | 默认推理输出上限，防止低质量检查点填满所有槽位                 |
+| `flow_steps`              |                   `16` | 整流 ODE 步数                               |
+| `d_model` / `n_layers`    |            `256` / `4` | 模型宽度 / 深度                               |
+| `n_latents`               |                   `32` | 文本潜瓶颈 K                                 |
+| `room_size`               |            `(8, 8, 4)` | 约束层房间尺寸                                 |
+| `collision_mode`          |                  `obb` | `obb`=15 轴有向盒 SAT；`aabb`=旧快速近似          |
+| `texture_mode`            |            `generated` | `generated` / `library`                 |
+| `texture_batch_size`      |                   `16` | 生成纹理的分批对象数                              |
+| `texture_size_limit`      |                 `4096` | 单边像素硬上限                                 |
+| `texture_train_size`      |                   `16` | 训练正则使用的可微纹理预览边长                         |
+| `use_amp` / `use_compile` |        `True` / `True` | 仅 CUDA 训练/推理时生效                         |
+| `amp_dtype`               |                 `auto` | 自动 BF16/FP16，或固定 `float16` / `bfloat16` |
+| `cuda_allow_tf32`         |                 `True` | RTX 30+ FP32 Tensor Core 加速             |
+| `cuda_cudnn_benchmark`    |                 `True` | 固定形状卷积内核自动择优                            |
 
 ## 测试
 
@@ -384,10 +421,15 @@ blender_addon/
 ## 已知边界
 
 - 项目没有随附预训练模型、大规模数据集或质量基准；生成质量取决于你的数据和训练。
+
 - API 后端把大模型用作语义/关系规划器，不生成网格；输出仍由代理几何体或后续资产检索阶段落地。不同兼容服务对 Structured Outputs、采样和模型名的支持并不一致。
+
 - TexHead 的 17 个控制量均进入参数先验，并通过小尺寸可微光栅预览接受图像空间正则；仍没有受监督的材质真值，写实材质需增加纹理标注/感知损失。
+
 - PyTorch SSM 参考扫描优先保证数学与梯度正确；生产级长序列 GPU 性能可在完成前向/反向数值对齐后接入 `mamba-ssm` 等成熟内核。
+
 - 支撑候选选择和 SAT 近平行轴屏蔽包含离散判定，因此约束是分段可微而非处处光滑。
+
 - Blender 资产 Collection 实例化仍是待接入的适配器；当前使用代理几何体。
 
 ## 空间建模路线说明

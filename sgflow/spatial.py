@@ -65,7 +65,8 @@ class PlannedObject:
     position: tuple[float, float, float]
     size: tuple[float, float, float]
     yaw_degrees: float
-    detail: dict[str, Any] | None = None  # 可选参数化几何描述 {"parts": [...], "smooth": bool}
+    detail: dict[str, Any] | None = None      # 参数化几何描述 {"parts": [...], "smooth": bool}
+    custom_mesh: dict[str, Any] | None = None  # L6 自由建模 {"vertices": [[x,y,z],...], "faces": [[v0,v1,v2],...]}
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,9 @@ class SpatialPlan:
             detail = raw.get("detail")
             if detail is not None and not isinstance(detail, dict):
                 raise ValueError(f"objects[{index}].detail must be an object or omitted")
+            custom_mesh = raw.get("custom_mesh")
+            if custom_mesh is not None and not isinstance(custom_mesh, dict):
+                raise ValueError(f"objects[{index}].custom_mesh must be an object or omitted")
             objects.append(PlannedObject(
                 object_id=object_id,
                 category=category,
@@ -124,6 +128,7 @@ class SpatialPlan:
                 size=_finite_vector(raw.get("size"), 3, f"objects[{index}].size", positive=True),
                 yaw_degrees=float(yaw),
                 detail=dict(detail) if detail is not None else None,
+                custom_mesh=dict(custom_mesh) if custom_mesh is not None else None,
             ))
 
         relations: list[SpatialRelation] = []
@@ -170,6 +175,8 @@ class SpatialPlan:
             }
             if item.detail is not None:
                 obj["detail"] = item.detail
+            if item.custom_mesh is not None:
+                obj["custom_mesh"] = item.custom_mesh
             out["objects"].append(obj)
         return out
 
@@ -372,6 +379,9 @@ def refine_spatial_plan(
     details = [item.detail for item in plan.objects]
     if any(detail is not None for detail in details):
         metadata["object_details"] = details
+    meshes = [item.custom_mesh for item in plan.objects]
+    if any(mesh is not None for mesh in meshes):
+        metadata["custom_meshes"] = meshes
     if model:
         metadata["model"] = model
     return SceneGraph(

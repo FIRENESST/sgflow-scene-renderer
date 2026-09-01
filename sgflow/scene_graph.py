@@ -94,7 +94,7 @@ class SceneGraph:
         idx = torch.arange(self.n, device=self.pos.device) if self.n == 0 else morton_order(self.pos)
         metadata = dict(self.metadata)
         order = [int(index) for index in idx.cpu()]
-        for key in ("object_ids", "object_details"):
+        for key in ("object_ids", "object_details", "custom_meshes"):
             values = metadata.get(key)
             if isinstance(values, list) and len(values) == self.n:
                 metadata[key] = [values[i] for i in order]
